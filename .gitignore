@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+segment_chat.db
+logs/
+db/
+test_p2p.py
