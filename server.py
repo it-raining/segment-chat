@@ -595,6 +595,37 @@ def broadcast_livestream_update(channel_id):
             except:
                 pass
 
+def broadcast_message_update(channel_id, content):
+    """Broadcast message updates to all clients in a channel."""
+    # Get client IDs for users in this channel
+    client_ids = []
+    with channel_users_lock:
+        if channel_id in channel_users:
+            client_ids = list(channel_users[channel_id].values())
+    
+    if not client_ids:
+        return
+    
+    # Create message update notification
+    notification = json.dumps({
+        "type": "message_update",
+        "channel_id": channel_id,
+        "content": content,
+        "timestamp": time.time()
+    })
+    
+    # Send to all clients in this channel
+    with users_lock:
+        for client_id in client_ids:
+            if client_id in active_sockets:
+                try:
+                    active_sockets[client_id].send(notification.encode('utf-8'))
+                except:
+                    # Skip failed sends, they'll be handled by connection loss detection
+                    pass
+    
+    log_connection(f"Broadcasted message update for channel {channel_id} to {len(client_ids)} clients")
+
 def handle_client(client_socket):
     client_id = f"{threading.current_thread().ident}"
     client_address = client_socket.getpeername()
@@ -724,6 +755,9 @@ def handle_client(client_socket):
                 conn.commit()
                 response = create_sync_content_response(True, "Content synced")
                 client_socket.send(response.encode('utf-8'))
+                
+                # Broadcast message update to all clients in this channel
+                broadcast_message_update(channel_id, content)
             
             elif data['type'] == 'get_channels':
                 # Return list of all channels, identifying which are public vs private

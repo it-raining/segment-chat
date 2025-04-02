@@ -407,6 +407,8 @@ class ChatApp:
         if self.client.current_channel:
             log_connection(f"Starting message polling for channel {self.client.current_channel}")
             self.poll_messages()
+            # Reduce polling frequency since we now have server push notifications
+            self.update_interval = 3000  # 3 seconds should be sufficient as a backup
             self.update_job = self.root.after(self.update_interval, self.start_message_polling)
 
     def stop_message_polling(self):
@@ -461,6 +463,12 @@ class ChatApp:
                 self.client._temp_messages = []
             self.client._temp_messages = messages
             
+            # Create a container to store PhotoImage references to prevent garbage collection
+            if not hasattr(self, '_image_references'):
+                self._image_references = []
+            else:
+                self._image_references.clear()
+            
             # Add messages to the chat area
             for msg in messages:
                 message_frame = ttk.Frame(self.messages_inner, style='TFrame')
@@ -484,10 +492,16 @@ class ChatApp:
                                      foreground="#000000", font=("Arial", 8))
                 time_label.pack(anchor=tk.W)
                 
-                # Check if this is a file message
+                # Check content structure and log it for debugging
+                log_connection(f"Message content type: {type(content)}")
+                if isinstance(content, dict):
+                    log_connection(f"Message content keys: {content.keys()}")
+                
+                # Check if content itself is a dict and has file_type (direct message format)
                 if isinstance(content, dict) and 'file_type' in content:
                     file_type = content.get('file_type')
                     file_name = content.get('file_name', 'unknown')
+                    file_data = content.get('file_data', '')
                     
                     # Show file info
                     file_info = ttk.Label(message_frame, text=f"Shared file: {file_name}",
@@ -495,46 +509,188 @@ class ChatApp:
                     file_info.pack(anchor=tk.W, pady=(2, 0))
                     
                     # For images, try to display them
-                    if file_type == 'image' and 'file_data' in content:
-                        try:
-                            import base64
-                            from io import BytesIO
-                            
-                            # Decode image data
-                            image_data = base64.b64decode(content['file_data'])
-                            image = Image.open(BytesIO(image_data))
-                            
-                            # Resize if too large
-                            max_width = 300
-                            if image.width > max_width:
-                                ratio = max_width / image.width
-                                new_height = int(image.height * ratio)
-                                image = image.resize((max_width, new_height))
-                                
-                            # Convert to Tkinter image
-                            tk_image = ImageTk.PhotoImage(image)
-                            
-                            # Store reference to prevent garbage collection
-                            setattr(file_info, 'image', tk_image)
-                            
-                            # Display image
-                            image_label = ttk.Label(message_frame, image=tk_image)
-                            image_label.pack(anchor=tk.W, pady=(5, 0))
-                        except Exception as e:
-                            error_label = ttk.Label(message_frame, 
-                                                 text=f"Error displaying image: {str(e)}",
-                                                 foreground="#ff0000")
-                            error_label.pack(anchor=tk.W, pady=(2, 0))
-                else:
-                    # Regular text message
+                    if file_type == 'image' and file_data:
+                        log_connection(f"Found image in message: {file_name}")
+                        self._display_image(message_frame, file_data, file_info)
+                
+                # Regular text message
+                elif isinstance(content, str):
                     content_label = ttk.Label(message_frame, text=content, 
-                                           wraplength=500, foreground="#000000")
+                                          wraplength=500, foreground="#000000")
+                    content_label.pack(anchor=tk.W, pady=(2, 0))
+                
+                # Handle case where the message itself might have file data
+                elif isinstance(msg, dict) and 'file_type' in msg:
+                    file_type = msg.get('file_type')
+                    file_name = msg.get('file_name', 'unknown')
+                    file_data = msg.get('file_data', '')
+                    
+                    # Show file info
+                    file_info = ttk.Label(message_frame, text=f"Shared file: {file_name}",
+                                       foreground="#000000")
+                    file_info.pack(anchor=tk.W, pady=(2, 0))
+                    
+                    # For images, try to display them
+                    if file_type == 'image' and file_data:
+                        log_connection(f"Found image in message object: {file_name}")
+                        self._display_image(message_frame, file_data, file_info)
+                else:
+                    # Fallback for any other type of content
+                    content_str = str(content)
+                    content_label = ttk.Label(message_frame, text=content_str, 
+                                          wraplength=500, foreground="#000000")
                     content_label.pack(anchor=tk.W, pady=(2, 0))
             
             # Scroll to bottom            
             self.messages_canvas.update_idletasks()
             self.messages_canvas.yview_moveto(1.0)
-    
+
+    def _display_image(self, message_frame, file_data, file_info):
+        """Helper function to display an image from base64 data."""
+        try:
+            import base64
+            from io import BytesIO
+            
+            # Decode image data
+            log_connection(f"Decoding image data of length: {len(file_data)}")
+            image_data = base64.b64decode(file_data)
+            
+            # Create a BytesIO object and open with PIL
+            img_io = BytesIO(image_data)
+            image = Image.open(img_io)
+            
+            # Log image details for debugging
+            log_connection(f"Successfully decoded image: {image.format}, {image.size}, {image.mode}")
+            
+            # Resize if too large
+            max_width = 300
+            if image.width > max_width:
+                ratio = max_width / image.width
+                new_height = int(image.height * ratio)
+                image = image.resize((max_width, new_height), Image.Resampling.LANCZOS)
+                log_connection(f"Resized image to: {image.width}x{new_height}")
+            
+            # Convert to Tkinter image
+            tk_image = ImageTk.PhotoImage(image=image)
+            
+            # Store reference to prevent garbage collection
+            self._image_references.append(tk_image)
+            
+            # Display image
+            image_label = ttk.Label(message_frame, image=tk_image)
+            image_label.image = tk_image  # Keep additional reference
+            image_label.pack(anchor=tk.W, pady=(5, 0))
+            
+            log_connection("Image displayed successfully")
+        except Exception as e:
+            log_connection(f"Error displaying image: {str(e)}")
+            error_label = ttk.Label(message_frame, 
+                                 text=f"Error displaying image: {str(e)}",
+                                 foreground="#ff0000")
+            error_label.pack(anchor=tk.W, pady=(2, 0))
+
+    def upload_file(self):
+        """Handle file upload and sharing."""
+        if not self.client.current_channel:
+            messagebox.showerror("Error", "Please join a channel first")
+            return
+        
+        # Only allow authenticated users to upload files
+        if not self.client.authenticated:
+            messagebox.showerror("Error", "You must be logged in to share files")
+            return
+        
+        file_path = filedialog.askopenfilename(
+            title="Select Image to Share",
+            filetypes=[("Image files", "*.jpg;*.jpeg;*.png;*.gif")]
+        )
+        
+        if not file_path:
+            return
+            
+        # Check file size
+        file_size = os.path.getsize(file_path)
+        if file_size > 5 * 1024 * 1024:  # 5MB limit
+            messagebox.showerror("Error", "File is too large (max 5MB)")
+            return
+            
+        # Show loading indicator
+        self.upload_btn.config(state="disabled", text="Uploading...")
+        
+        # Process in a separate thread to avoid freezing UI
+        def process_upload():
+            try:
+                # Validate the image file
+                try:
+                    img = Image.open(file_path)
+                    img.verify()  # Verify it's a valid image
+                    
+                    # Re-open because verify closes the file
+                    img = Image.open(file_path)
+                    
+                    # Resize if too large to reduce file size
+                    max_size = (800, 800)
+                    if img.width > max_size[0] or img.height > max_size[1]:
+                        img.thumbnail(max_size, Image.Resampling.LANCZOS)
+                        
+                    # Save to a temporary BytesIO object
+                    from io import BytesIO
+                    img_byte_arr = BytesIO()
+                    save_format = img.format if img.format else "JPEG"
+                    img.save(img_byte_arr, format=save_format)
+                    img_byte_arr.seek(0)
+                    img_data = img_byte_arr.read()
+                    
+                    # Log image details for debugging
+                    log_connection(f"Processing image: {img.format}, {img.size}, {img.mode}")
+                    
+                except Exception as e:
+                    log_connection(f"Error processing image: {str(e)}")
+                    self.root.after(0, lambda: messagebox.showerror("Error", f"Invalid image file: {str(e)}"))
+                    self.root.after(0, lambda: self.upload_btn.config(state="normal", text="Upload"))
+                    return
+                
+                # Encode the image data
+                import base64
+                file_data = base64.b64encode(img_data).decode('utf-8')
+                
+                filename = os.path.basename(file_path)
+                
+                # Log upload attempt with more detailed info
+                log_connection(f"Uploading image: {filename} ({len(file_data)} bytes encoded)")
+                
+                # Send as a special message type with more explicit structure
+                message_data = {
+                    "file_type": "image",
+                    "file_data": file_data,
+                    "file_name": filename,
+                    "image_format": save_format,
+                    "image_width": img.width,
+                    "image_height": img.height
+                }
+                
+                # Send the message to the server
+                success = self.client.send_message(self.client.current_channel, message_data)
+                
+                if success:
+                    log_connection(f"Image upload successful: {filename}")
+                    # Force a refresh of the messages to ensure our image appears
+                    self.client.get_messages(self.client.current_channel)
+                else:
+                    log_connection(f"Image upload failed: {filename}")
+                    self.root.after(0, lambda: messagebox.showerror("Error", "Failed to send image. The server may have rejected it."))
+                
+                # Re-enable the upload button
+                self.root.after(0, lambda: self.upload_btn.config(state="normal", text="Upload"))
+                
+            except Exception as e:
+                log_connection(f"Error in file upload: {str(e)}")
+                self.root.after(0, lambda: messagebox.showerror("Error", f"Failed to upload file: {str(e)}"))
+                self.root.after(0, lambda: self.upload_btn.config(state="normal", text="Upload"))
+        
+        # Start the upload process in a background thread
+        threading.Thread(target=process_upload, daemon=True).start()
+
     def update_online_status(self, is_online, username=None):
         """Update UI based on online status events."""
         if username:
@@ -763,53 +919,6 @@ class ChatApp:
         if not self.client.connected:
             self.status_var.set("Reconnecting...")
             threading.Thread(target=self.client.connect, daemon=True).start()
-    
-    def upload_file(self):
-        """Handle file upload and sharing."""
-        if not self.client.current_channel:
-            messagebox.showerror("Error", "Please join a channel first")
-            return
-        
-        # Only allow authenticated users to upload files
-        if not self.client.authenticated:
-            messagebox.showerror("Error", "You must be logged in to share files")
-            return
-        
-        file_path = filedialog.askopenfilename(
-            title="Select Image to Share",
-            filetypes=[("Image files", "*.jpg;*.jpeg;*.png;*.gif")]
-        )
-        
-        if not file_path:
-            return
-            
-        # Check file size
-        file_size = os.path.getsize(file_path)
-        if file_size > 5 * 1024 * 1024:  # 5MB limit
-            messagebox.showerror("Error", "File is too large (max 5MB)")
-            return
-            
-        # For images, we'll implement a base64 encoding schema
-        # In a real app, you might want to upload to an external service
-        try:
-            with open(file_path, "rb") as file:
-                import base64
-                file_data = base64.b64encode(file.read()).decode('utf-8')
-                
-            filename = os.path.basename(file_path)
-            
-            # Send as a special message type
-            content = f"[Shared image: {filename}]"
-            message_data = {
-                "content": content,
-                "file_type": "image",
-                "file_data": file_data,
-                "file_name": filename
-            }
-            
-            self.client.send_message(self.client.current_channel, message_data)
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to upload file: {str(e)}")
     
     def send_message_event(self, event):
         if not event.state & 0x1:  # Check if Shift key is not pressed

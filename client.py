@@ -488,6 +488,32 @@ class ChatClient:
                     # Notify UI
                     if self.channel_users_callback:
                         self.channel_users_callback(channel_id, self.channel_users[channel_id], event, username)
+                
+                # Add handler for direct message updates from server
+                elif response['type'] == 'message_update':
+                    channel_id = response['channel_id']
+                    messages = response['content']
+                    
+                    # Only update UI if this is the current channel
+                    if self.current_channel == channel_id:
+                        # Cache content for offline use
+                        if self.offline_storage:
+                            self.offline_storage.cache_channel_content(
+                                channel_id,
+                                messages
+                            )
+                        # Update UI
+                        if self.message_callback:
+                            self.message_callback(messages)
+                            # Store messages for future sending
+                            self._temp_messages = messages
+                    else:
+                        # Still update cache for non-current channels
+                        if self.offline_storage:
+                            self.offline_storage.cache_channel_content(
+                                channel_id,
+                                messages
+                            )
             
             except json.JSONDecodeError:
                 log_connection("Received invalid JSON from server")
@@ -649,20 +675,30 @@ class ChatClient:
         # Check if we're the host for this channel
         if channel_id in self.is_channel_host and self.is_channel_host[channel_id]:
             # We're the host - broadcast to peers and sync with server
-            message = {
-                "content": content,
-                "timestamp": time.time(),
-                "sender": self.username or "visitor"
-            }
+            # Check if message contains file data
+            if isinstance(content, dict) and 'file_type' in content:
+                # For file messages, keep content structure intact
+                message = {
+                    "content": content,  # Keep the complete content dict
+                    "timestamp": time.time(),
+                    "sender": self.username or "visitor"
+                }
+            else:
+                # Regular text message
+                message = {
+                    "content": content,
+                    "timestamp": time.time(),
+                    "sender": self.username or "visitor"
+                }
             
             # Get current content and add our message
-            current_content = getattr(self, '_temp_messages', [])
+            current_content = getattr(self, '_temp_messages', []) if hasattr(self, '_temp_messages') else []
             updated_content = current_content + [message]
             
             # Broadcast to peers
             self.peer_manager.broadcast_content_to_peers(channel_id, updated_content)
             
-            # Also sync with server for backup
+            # Also sync with server for backup and broadcasting to other clients
             self._sync_with_server(channel_id, updated_content)
             
             return True
@@ -670,14 +706,24 @@ class ChatClient:
         # Check if we have a connection to the host
         elif self.online and self.peer_manager.channel_hosts.get(channel_id, (None, None, False))[2]:
             # We can send directly to host
-            message = {
-                "content": content,
-                "timestamp": time.time(),
-                "sender": self.username or "visitor"
-            }
+            # Check if message contains file data
+            if isinstance(content, dict) and 'file_type' in content:
+                # Keep complete file data structure
+                message = {
+                    "content": content,
+                    "timestamp": time.time(),
+                    "sender": self.username or "visitor"
+                }
+            else:
+                # Regular text message
+                message = {
+                    "content": content,
+                    "timestamp": time.time(),
+                    "sender": self.username or "visitor"
+                }
             
             # Get current content with safer access
-            current_content = getattr(self, '_temp_messages', [])
+            current_content = getattr(self, '_temp_messages', []) if hasattr(self, '_temp_messages') else []
             updated_content = current_content + [message]
                 
             # Send to host
@@ -688,12 +734,24 @@ class ChatClient:
         if not self.online:
             # Store message locally if offline
             if self.offline_storage:
-                message = {
-                    "content": content,
-                    "timestamp": time.time(),
-                    "sender": self.username or "visitor",
-                    "offline": True
-                }
+                # Check if message contains file data
+                if isinstance(content, dict) and 'file_type' in content:
+                    # For file messages, keep complete structure
+                    message = {
+                        "content": content,
+                        "timestamp": time.time(),
+                        "sender": self.username or "visitor",
+                        "offline": True
+                    }
+                else:
+                    # Regular text message
+                    message = {
+                        "content": content,
+                        "timestamp": time.time(),
+                        "sender": self.username or "visitor",
+                        "offline": True
+                    }
+                
                 self.offline_storage.store_offline_message(channel_id, message)
                 
                 # Update local cache with this message for immediate display
@@ -710,31 +768,54 @@ class ChatClient:
             return False
             
         # Online - normal flow
-        request = {
-            "type": "get_messages",
-            "channel_id": channel_id
-        }
-        
         try:
-            self.socket.send(json.dumps(request).encode('utf-8'))
-            time.sleep(0.2)
-                
             # Make sure _temp_messages exists and is a list
             if not hasattr(self, '_temp_messages') or not isinstance(self._temp_messages, list):
                 self._temp_messages = []
                 
-            request = {
-                "type": "sync_content",
-                "channel_id": channel_id,
-                "content": self._temp_messages + [{
+            # Check if message contains file data
+            if isinstance(content, dict) and 'file_type' in content:
+                # For file messages, keep complete content structure
+                message = {
                     "content": content,
                     "timestamp": time.time(),
                     "sender": self.username or "visitor"
-                }]
+                }
+                log_connection(f"Sending image message with structure: {list(content.keys())}") 
+            else:
+                # Regular text message
+                message = {
+                    "content": content,
+                    "timestamp": time.time(),
+                    "sender": self.username or "visitor"
+                }
+            
+            updated_content = self._temp_messages + [message]
+            
+            request = {
+                "type": "sync_content",
+                "channel_id": channel_id,
+                "content": updated_content
             }
-            self.socket.send(json.dumps(request).encode('utf-8'))
+            
+            # Log the message size for debugging
+            request_json = json.dumps(request)
+            msg_size = len(request_json)
+            log_connection(f"Sending message with size: {msg_size} bytes")
+            
+            # Check if message is too large - typically socket buffers are ~64KB
+            if msg_size > 1024 * 1024:  # 1MB
+                log_connection(f"Warning: Very large message ({msg_size/1024/1024:.2f} MB)")
+            
+            self.socket.send(request_json.encode('utf-8'))
+            
+            # Also update local cache
+            if self.offline_storage:
+                self.offline_storage.cache_channel_content(channel_id, updated_content)
+                
             return True
         except Exception as e:
+            log_connection(f"Error sending message: {str(e)}")
             if self.error_callback:
                 self.error_callback(f"Error sending message: {str(e)}")
             return False
