@@ -41,21 +41,29 @@ class AdminClient:
         }
         
         try:
+            # Increase timeout for more reliable operation
+            self.socket.settimeout(15.0)  # 15 seconds timeout for login
             self.socket.send(json.dumps(request).encode('utf-8'))
-            # Set a receive timeout
-            self.socket.settimeout(self.timeout)
-            response = json.loads(self.socket.recv(4096).decode('utf-8'))
+            
+            # Wait for response
+            response_data = self.socket.recv(4096).decode('utf-8')
+            response = json.loads(response_data)
+            
+            log_connection(f"Admin login response: {response}")
             
             if response['type'] == 'admin_login_response':
                 self.authenticated = response['success']
                 return response['success'], response['message']
             return False, "Invalid response from server"
         except socket.timeout:
+            log_connection("Admin login timed out")
             return False, "Connection timed out waiting for server response"
         except ConnectionError as e:
             self.connected = False
+            log_connection(f"Admin login connection error: {str(e)}")
             return False, f"Connection error: {str(e)}"
         except Exception as e:
+            log_connection(f"Admin login error: {str(e)}")
             return False, str(e)
     
     def get_users(self):

@@ -626,6 +626,232 @@ def broadcast_message_update(channel_id, content):
     
     log_connection(f"Broadcasted message update for channel {channel_id} to {len(client_ids)} clients")
 
+def handle_admin_login(client_socket, client_id, data):
+    """Handle admin login request."""
+    username = data['username']
+    password = data['password']
+    
+    cursor.execute("SELECT * FROM admin_users WHERE username=? AND password=?", (username, password))
+    if cursor.fetchone():
+        with users_lock:
+            active_users[client_id] = {
+                "authenticated": True, 
+                "username": username,
+                "is_admin": True
+            }
+        response = {
+            "type": "admin_login_response",
+            "success": True,
+            "message": "Admin login successful"
+        }
+    else:
+        response = {
+            "type": "admin_login_response",
+            "success": False,
+            "message": "Invalid admin credentials"
+        }
+    client_socket.send(json.dumps(response).encode('utf-8'))
+
+def handle_get_users(client_socket, client_id):
+    """Handle request to get all users."""
+    # Verify admin authentication
+    with users_lock:
+        is_admin = active_users.get(client_id, {}).get("is_admin", False)
+    
+    if not is_admin:
+        response = {
+            "type": "get_users_response",
+            "success": False,
+            "message": "Admin privileges required"
+        }
+        client_socket.send(json.dumps(response).encode('utf-8'))
+        return
+        
+    # Get users from database
+    cursor.execute("SELECT username FROM users")
+    regular_users = [{"username": row[0], "is_admin": False} for row in cursor.fetchall()]
+    
+    cursor.execute("SELECT username FROM admin_users")
+    admin_users = [{"username": row[0], "is_admin": True} for row in cursor.fetchall()]
+    
+    # Combine and send
+    response = {
+        "type": "get_users_response",
+        "success": True,
+        "users": regular_users + admin_users
+    }
+    client_socket.send(json.dumps(response).encode('utf-8'))
+
+def handle_admin_create_user(client_socket, client_id, data):
+    """Handle request to create a new user by an admin."""
+    # Verify admin authentication
+    with users_lock:
+        is_admin = active_users.get(client_id, {}).get("is_admin", False)
+    
+    if not is_admin:
+        response = {
+            "type": "admin_create_user_response",
+            "success": False,
+            "message": "Admin privileges required"
+        }
+        client_socket.send(json.dumps(response).encode('utf-8'))
+        return
+        
+    username = data['username']
+    password = data['password']
+    is_admin_user = data.get('is_admin', False)
+    
+    try:
+        if is_admin_user:
+            cursor.execute("INSERT INTO admin_users (username, password) VALUES (?, ?)", 
+                         (username, password))
+        else:
+            cursor.execute("INSERT INTO users (username, password) VALUES (?, ?)", 
+                         (username, password))
+        conn.commit()
+        
+        response = {
+            "type": "admin_create_user_response",
+            "success": True,
+            "message": f"User {username} created successfully"
+        }
+    except sqlite3.IntegrityError:
+        response = {
+            "type": "admin_create_user_response",
+            "success": False,
+            "message": "Username already exists"
+        }
+    except Exception as e:
+        response = {
+            "type": "admin_create_user_response",
+            "success": False,
+            "message": f"Error creating user: {str(e)}"
+        }
+    
+    client_socket.send(json.dumps(response).encode('utf-8'))
+
+def handle_admin_delete_user(client_socket, client_id, data):
+    """Handle request to delete a user by an admin."""
+    # Verify admin authentication
+    with users_lock:
+        is_admin = active_users.get(client_id, {}).get("is_admin", False)
+    
+    if not is_admin:
+        response = {
+            "type": "admin_delete_user_response",
+            "success": False,
+            "message": "Admin privileges required"
+        }
+        client_socket.send(json.dumps(response).encode('utf-8'))
+        return
+    
+    username = data['username']
+    
+    try:
+        # Try to delete from regular users
+        cursor.execute("DELETE FROM users WHERE username=?", (username,))
+        regular_deleted = cursor.rowcount > 0
+        
+        # Also try admin users (if no regular user was found)
+        cursor.execute("DELETE FROM admin_users WHERE username=?", (username,))
+        admin_deleted = cursor.rowcount > 0
+        
+        if regular_deleted or admin_deleted:
+            conn.commit()
+            response = {
+                "type": "admin_delete_user_response",
+                "success": True,
+                "message": f"User {username} deleted successfully"
+            }
+        else:
+            response = {
+                "type": "admin_delete_user_response",
+                "success": False,
+                "message": "User not found"
+            }
+    except Exception as e:
+        response = {
+            "type": "admin_delete_user_response",
+            "success": False,
+            "message": f"Error deleting user: {str(e)}"
+        }
+    
+    client_socket.send(json.dumps(response).encode('utf-8'))
+
+def handle_admin_restart_server(client_socket, client_id):
+    """Handle request to restart the server."""
+    # Verify admin authentication
+    with users_lock:
+        is_admin = active_users.get(client_id, {}).get("is_admin", False)
+    
+    if not is_admin:
+        response = {
+            "type": "admin_restart_server_response",
+            "success": False,
+            "message": "Admin privileges required"
+        }
+        client_socket.send(json.dumps(response).encode('utf-8'))
+        return
+    
+    # Send response before restarting
+    response = {
+        "type": "admin_restart_server_response",
+        "success": True,
+        "message": "Server restarting..."
+    }
+    client_socket.send(json.dumps(response).encode('utf-8'))
+    
+    # Set shutdown flag with restart intention
+    global shutdown_flag
+    log_connection("Admin requested server restart")
+    shutdown_flag.set()
+    
+    # Start a new process to restart the server after a short delay
+    import subprocess
+    import sys
+    import os
+    
+    def restart_server():
+        time.sleep(1)  # Give time for connections to close
+        script_path = os.path.abspath(__file__)
+        subprocess.Popen([sys.executable, script_path])
+        
+    threading.Thread(target=restart_server, daemon=True).start()
+    
+    # Force exit after a few seconds
+    threading.Timer(5, lambda: os._exit(0)).start()
+
+def handle_admin_shutdown_server(client_socket, client_id):
+    """Handle request to shut down the server."""
+    # Verify admin authentication
+    with users_lock:
+        is_admin = active_users.get(client_id, {}).get("is_admin", False)
+    
+    if not is_admin:
+        response = {
+            "type": "admin_shutdown_server_response",
+            "success": False,
+            "message": "Admin privileges required"
+        }
+        client_socket.send(json.dumps(response).encode('utf-8'))
+        return
+    
+    # Send response before shutting down
+    response = {
+        "type": "admin_shutdown_server_response",
+        "success": True,
+        "message": "Server shutting down..."
+    }
+    client_socket.send(json.dumps(response).encode('utf-8'))
+    
+    # Set shutdown flag
+    global shutdown_flag
+    log_connection("Admin requested server shutdown")
+    shutdown_flag.set()
+    
+    # Force exit after a few seconds
+    threading.Timer(5, lambda: os._exit(0)).start()
+
 def handle_client(client_socket):
     client_id = f"{threading.current_thread().ident}"
     client_address = client_socket.getpeername()
@@ -655,7 +881,27 @@ def handle_client(client_socket):
                     peers.append({'ip': data['ip'], 'port': data['port']})
                 response = create_submit_info_response(True, "Registration successful")
                 client_socket.send(response.encode('utf-8'))
+            
+            # Handle admin-specific message types
+            elif data['type'] == 'admin_login':
+                handle_admin_login(client_socket, client_id, data)
+            
+            elif data['type'] == 'get_users':
+                handle_get_users(client_socket, client_id)
                 
+            elif data['type'] == 'admin_create_user':
+                handle_admin_create_user(client_socket, client_id, data)
+                
+            elif data['type'] == 'admin_delete_user':
+                handle_admin_delete_user(client_socket, client_id, data)
+                
+            elif data['type'] == 'admin_restart_server':
+                handle_admin_restart_server(client_socket, client_id)
+                
+            elif data['type'] == 'admin_shutdown_server':
+                handle_admin_shutdown_server(client_socket, client_id)
+                
+            # Handle regular client message types
             elif data['type'] == 'get_list':
                 with peers_lock:
                     response = create_get_list_response(peers)
