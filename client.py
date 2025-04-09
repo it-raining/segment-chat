@@ -168,21 +168,24 @@ class ChatClient:
 
     def _schedule_reconnect(self):
         """Schedule a reconnection attempt with exponential backoff."""
-        if self.reconnect_attempts < self.max_reconnect_attempts:
-            self.reconnect_attempts += 1
-            delay = self.reconnect_delay * (2 ** (self.reconnect_attempts - 1))
+        if hasattr(self, '_reconnect_thread') and self._reconnect_thread.is_alive():
+            return  # Avoid multiple reconnection threads
             
-            if self.error_callback:
-                self.error_callback(f"Reconnecting in {delay} seconds (attempt {self.reconnect_attempts})")
-                
-            reconnect_thread = threading.Thread(
-                target=lambda: (time.sleep(delay), self.connect())
-            )
-            reconnect_thread.daemon = True
-            reconnect_thread.start()
-        else:
+        self.reconnect_attempts += 1
+        if self.reconnect_attempts > self.max_reconnect_attempts:
             if self.error_callback:
                 self.error_callback("Maximum reconnection attempts reached")
+            return
+        
+        delay = self.reconnect_delay * (2 ** (self.reconnect_attempts - 1))
+        if self.error_callback:
+            self.error_callback(f"Reconnecting in {delay} seconds (attempt {self.reconnect_attempts})")
+        
+        self._reconnect_thread = threading.Thread(
+            target=lambda: (time.sleep(delay), self.connect())
+        )
+        self._reconnect_thread.daemon = True
+        self._reconnect_thread.start()
 
     def _send_heartbeats(self):
         """Send periodic heartbeats to the server."""
@@ -232,6 +235,10 @@ class ChatClient:
         if self.connected:
             self.connected = False
             self.online = False
+            self.authenticated = False  # Reset authentication state
+            self.username = None  # Clear username
+            self.current_channel = None # Clear current channel
+            self.channel_users = {} # Clear channel users
             
             if self.connection_callback:
                 self.connection_callback(False)
@@ -325,7 +332,24 @@ class ChatClient:
                     log_connection("Empty data received from server, disconnecting")
                     break
                     
-                response = json.loads(data)
+                try:
+                    # Handle potential multiple JSON responses in one packet
+                    if data.count('}{') > 0:
+                        log_connection("Detected multiple JSON objects in response, splitting")
+                        json_start = data.find('{')
+                        json_end = data.rfind('}') + 1
+                        if json_start >= 0 and json_end > json_start:
+                            data = data[json_start:json_end]
+                    
+                    response = json.loads(data)
+                    
+                except json.JSONDecodeError as e:
+                    log_connection(f"Received invalid JSON from server: {e}")
+                    log_connection(f"Invalid JSON data: {data[:100]}...")  # Log partial data for debugging
+                    # if self.error_callback:
+                    #     self.error_callback("Received invalid data from server")
+                    continue
+                    
                 response_type = response.get('type', 'unknown')
                 log_connection(f"Received {response_type} from server")
                 
@@ -461,7 +485,8 @@ class ChatClient:
                     channel_id = response.get('channel_id')
                     users = response.get('users', [])
                     
-                    # Update local tracking
+                    # Update local tracking with more detailed logging
+                    log_connection(f"Received user list for channel {channel_id}: {users}")
                     self.channel_users[channel_id] = users
                         
                     # Notify UI
@@ -515,18 +540,20 @@ class ChatClient:
                                 messages
                             )
             
-            except json.JSONDecodeError:
-                log_connection("Received invalid JSON from server")
+            except json.JSONDecodeError as e:
+                log_connection(f"JSON decode error: {e}")
                 if self.error_callback:
                     self.error_callback("Received invalid data from server")
-            except ConnectionError:
+            except (ConnectionError, ConnectionResetError, ConnectionAbortedError):
+                log_connection("Connection error detected")
                 self._handle_connection_loss()
                 break
             except Exception as e:
+                log_connection(f"Error in message listener: {str(e)}")
                 if self.error_callback:
                     self.error_callback(f"Error receiving data: {str(e)}")
                 self._handle_connection_loss()
-                break            
+                break
                 
         # Connection lost
         if self.connected:
@@ -538,16 +565,13 @@ class ChatClient:
             if self.error_callback:
                 self.error_callback("Not connected to server")
             return False
-            
         # Store username temporarily until we get confirmation
         self._temp_username = username
-        
         request = {
             "type": "login",
             "username": username,
             "password": password
         }
-        
         try:
             self.socket.send(json.dumps(request).encode('utf-8'))
             return True
@@ -557,19 +581,54 @@ class ChatClient:
                 self.error_callback(f"Login error: {str(e)}")
             return False
 
+    def admin_login(self, username, password):
+        """Authenticate as an admin with the server."""
+        if not self.connected:
+            if self.error_callback:
+                self.error_callback("Not connected to server")
+            return False
+        # Store username temporarily until we get confirmation
+        self._temp_username = username
+        request = {
+            "type": "admin_login",
+            "username": username,
+            "password": password
+        }
+        try:
+            self.socket.send(json.dumps(request).encode('utf-8'))
+            return True
+        except Exception as e:
+            self._handle_connection_loss()
+            if self.error_callback:
+                self.error_callback(f"Admin login error: {str(e)}")
+            return False
+
+    def update_auth_status(self, success, message, is_admin=False):
+        """Update authentication status."""
+        if success:
+            self.authenticated = True
+            self.username = self._temp_username
+            self.is_admin = is_admin  # Track if the user is an admin
+            if self.auth_callback:
+                self.auth_callback(success, message)
+        else:
+            self.authenticated = False
+            self.username = None
+            self.is_admin = False
+            if self.auth_callback:
+                self.auth_callback(success, message)
+
     def register(self, username, password):
         """Register a new user with the server."""
         if not self.connected:
             if self.error_callback:
                 self.error_callback("Not connected to server")
             return False
-            
         request = {
             "type": "register",
             "username": username,
             "password": password
         }
-        
         try:
             self.socket.send(json.dumps(request).encode('utf-8'))
             return True
@@ -585,11 +644,9 @@ class ChatClient:
             if self.error_callback:
                 self.error_callback("Not connected to server")
             return False
-            
         request = {
             "type": "get_channels"
         }
-        
         try:
             self.socket.send(json.dumps(request).encode('utf-8'))
             return True
@@ -605,10 +662,8 @@ class ChatClient:
             if self.error_callback:
                 self.error_callback("Must be authenticated to create a channel")
             return False
-                
         # Use local IP as host
         host_ip = socket.gethostbyname(socket.gethostname())
-            
         request = {
             "type": "create_channel",
             "channel_id": channel_id,
@@ -616,7 +671,6 @@ class ChatClient:
             "host_port": 0,  # Not used directly
             "is_public": is_public
         }
-            
         try:
             self.socket.send(json.dumps(request).encode('utf-8'))
             return True
@@ -626,281 +680,28 @@ class ChatClient:
                 self.error_callback(f"Error creating channel: {str(e)}")
             return False
 
-    def get_channel_host(self, channel_id):
-        """Get host information for a channel."""
-        if not self.connected:
-            if self.error_callback:
-                self.error_callback("Not connected to server")
-            return None
-                
-        request = {
-            "type": "get_channel_host",
-            "channel_id": channel_id
-        }
-            
-        try:
-            self.socket.send(json.dumps(request).encode('utf-8'))
-            # This should be handled asynchronously via callback
-            return {"success": True}
-        except Exception as e:
-            self._handle_connection_loss()
-            if self.error_callback:
-                self.error_callback(f"Error getting channel host: {str(e)}")
-            return None
-
-    def logout(self):
-        """Logout from the server."""
-        if not self.connected:
-            self.authenticated = False
-            self.username = None
-            return True
-                
-        request = {
-            "type": "logout"
-        }
-            
-        try:
-            self.socket.send(json.dumps(request).encode('utf-8'))
-            self.authenticated = False
-            self.username = None
-            return True
-        except Exception as e:
-            self._handle_connection_loss()
-            self.authenticated = False
-            self.username = None
-            return False
-
-    def send_message(self, channel_id, content):
-        """Send a message to a channel."""
-        # Check if we're the host for this channel
-        if channel_id in self.is_channel_host and self.is_channel_host[channel_id]:
-            # We're the host - broadcast to peers and sync with server
-            # Check if message contains file data
-            if isinstance(content, dict) and 'file_type' in content:
-                # For file messages, keep content structure intact
-                message = {
-                    "content": content,  # Keep the complete content dict
-                    "timestamp": time.time(),
-                    "sender": self.username or "visitor"
-                }
-            else:
-                # Regular text message
-                message = {
-                    "content": content,
-                    "timestamp": time.time(),
-                    "sender": self.username or "visitor"
-                }
-            
-            # Get current content and add our message
-            current_content = getattr(self, '_temp_messages', []) if hasattr(self, '_temp_messages') else []
-            updated_content = current_content + [message]
-            
-            # Broadcast to peers
-            self.peer_manager.broadcast_content_to_peers(channel_id, updated_content)
-            
-            # Also sync with server for backup and broadcasting to other clients
-            self._sync_with_server(channel_id, updated_content)
-            
-            return True
-        
-        # Check if we have a connection to the host
-        elif self.online and self.peer_manager.channel_hosts.get(channel_id, (None, None, False))[2]:
-            # We can send directly to host
-            # Check if message contains file data
-            if isinstance(content, dict) and 'file_type' in content:
-                # Keep complete file data structure
-                message = {
-                    "content": content,
-                    "timestamp": time.time(),
-                    "sender": self.username or "visitor"
-                }
-            else:
-                # Regular text message
-                message = {
-                    "content": content,
-                    "timestamp": time.time(),
-                    "sender": self.username or "visitor"
-                }
-            
-            # Get current content with safer access
-            current_content = getattr(self, '_temp_messages', []) if hasattr(self, '_temp_messages') else []
-            updated_content = current_content + [message]
-                
-            # Send to host
-            if self.peer_manager.send_content_to_host(channel_id, updated_content):
-                return True
-        
-        # Fall back to server if offline or no host connection
-        if not self.online:
-            # Store message locally if offline
-            if self.offline_storage:
-                # Check if message contains file data
-                if isinstance(content, dict) and 'file_type' in content:
-                    # For file messages, keep complete structure
-                    message = {
-                        "content": content,
-                        "timestamp": time.time(),
-                        "sender": self.username or "visitor",
-                        "offline": True
-                    }
-                else:
-                    # Regular text message
-                    message = {
-                        "content": content,
-                        "timestamp": time.time(),
-                        "sender": self.username or "visitor",
-                        "offline": True
-                    }
-                
-                self.offline_storage.store_offline_message(channel_id, message)
-                
-                # Update local cache with this message for immediate display
-                cached = self.offline_storage.get_cached_content(channel_id)
-                if cached:
-                    updated_content = cached['content'] + [message]
-                    self.offline_storage.cache_channel_content(channel_id, updated_content)
-                    
-                    # Notify UI about new message
-                    if self.message_callback:
-                        self.message_callback(updated_content)
-                        
-                return True
-            return False
-            
-        # Online - normal flow
-        try:
-            # Make sure _temp_messages exists and is a list
-            if not hasattr(self, '_temp_messages') or not isinstance(self._temp_messages, list):
-                self._temp_messages = []
-                
-            # Check if message contains file data
-            if isinstance(content, dict) and 'file_type' in content:
-                # For file messages, keep complete content structure
-                message = {
-                    "content": content,
-                    "timestamp": time.time(),
-                    "sender": self.username or "visitor"
-                }
-                log_connection(f"Sending image message with structure: {list(content.keys())}") 
-            else:
-                # Regular text message
-                message = {
-                    "content": content,
-                    "timestamp": time.time(),
-                    "sender": self.username or "visitor"
-                }
-            
-            updated_content = self._temp_messages + [message]
-            
-            request = {
-                "type": "sync_content",
-                "channel_id": channel_id,
-                "content": updated_content
-            }
-            
-            # Log the message size for debugging
-            request_json = json.dumps(request)
-            msg_size = len(request_json)
-            log_connection(f"Sending message with size: {msg_size} bytes")
-            
-            # Check if message is too large - typically socket buffers are ~64KB
-            if msg_size > 1024 * 1024:  # 1MB
-                log_connection(f"Warning: Very large message ({msg_size/1024/1024:.2f} MB)")
-            
-            self.socket.send(request_json.encode('utf-8'))
-            
-            # Also update local cache
-            if self.offline_storage:
-                self.offline_storage.cache_channel_content(channel_id, updated_content)
-                
-            return True
-        except Exception as e:
-            log_connection(f"Error sending message: {str(e)}")
-            if self.error_callback:
-                self.error_callback(f"Error sending message: {str(e)}")
-            return False
-
-    def _sync_with_server(self, channel_id, content):
-        """Sync content with the server for backup."""
-        if not self.connected:
-            return False
-            
-        request = {
-            "type": "sync_content",
-            "channel_id": channel_id,
-            "content": content
-        }
-        
-        try:
-            self.socket.send(json.dumps(request).encode('utf-8'))
-            return True
-        except Exception as e:
-            self._handle_connection_loss()
-            return False
-
-    def get_messages(self, channel_id):
-        """Get messages for a channel."""
-        # Set the current channel to ensure responses go to the right place
-        self.current_channel = channel_id
-        
-        # First try to get from host if we're connected
-        if self.online and self.peer_manager.channel_hosts.get(channel_id, (None, None, False))[2]:
-            # We're connected to host - messages should come through the peer connection
-            # Still request from server as a fallback
-            log_connection(f"Requesting messages for channel {channel_id} from peer host")
-            # Let peer connection handle it, but still fetch from server as backup
-        
-        # Then try cached content if offline
-        if not self.online and self.offline_storage:
-            cached = self.offline_storage.get_cached_content(channel_id)
-            if cached and self.message_callback:
-                log_connection(f"Using cached content for channel {channel_id}")
-                self.message_callback(cached['content'])
-                return True
-        
-        # Finally, fetch from server
-        log_connection(f"Requesting messages for channel {channel_id} from server")
-        request = {
-            "type": "get_messages",
-            "channel_id": channel_id
-        }
-        
-        try:
-            self.socket.send(json.dumps(request).encode('utf-8'))
-            return True
-        except Exception as e:
-            self._handle_connection_loss()
-            if self.error_callback:
-                self.error_callback(f"Error getting messages: {str(e)}")
-            return False
-
     def join_channel(self, channel_id):
         """Join a channel."""
-        # Try to get cached content if offline
-        if not self.online and self.offline_storage:
-            cached = self.offline_storage.get_cached_content(channel_id)
-            if cached and self.message_callback:
-                self.message_callback(cached['content'])
-                return True
-                
-        # Online - normal flow
         if not self.connected:
             if self.error_callback:
                 self.error_callback("Not connected to server")
             return False
-                
+        
+        # Update current channel
+        self.current_channel = channel_id
+        
+        # Create request
         request = {
             "type": "join_channel",
-            "channel_id": channel_id
+            "channel_id": channel_id,
+            "username": self.username if self.authenticated else "visitor",
+            "is_visitor": not self.authenticated
         }
         
         try:
             self.socket.send(json.dumps(request).encode('utf-8'))
             
-            # After joining, check if there's a host and connect if available
-            self._check_and_connect_to_host(channel_id)
-            
-            # Request users for new channel
+            # Request list of users in this channel
             self.get_channel_users(channel_id)
             
             return True
@@ -910,27 +711,155 @@ class ChatClient:
                 self.error_callback(f"Error joining channel: {str(e)}")
             return False
 
-    def _check_and_connect_to_host(self, channel_id):
-        """Check if there's a host for this channel and connect to it."""
+    def leave_channel(self, channel_id):
+        """Leave a channel."""
+        if not self.connected:
+            return False
+        
         request = {
-            "type": "get_channel_host_info",
+            "type": "leave_channel",
             "channel_id": channel_id
         }
         
         try:
             self.socket.send(json.dumps(request).encode('utf-8'))
-        except:
+            
+            # If this is the current channel, reset it
+            if self.current_channel == channel_id:
+                self.current_channel = None
+                
+            return True
+        except Exception as e:
             self._handle_connection_loss()
+            if self.error_callback:
+                self.error_callback(f"Error leaving channel: {str(e)}")
+            return False
 
-    def get_channel_users(self, channel_id):
-        """Get the list of users in a channel."""
+    def get_messages(self, channel_id):
+        """Get messages for a channel with improved error handling."""
         if not self.connected:
             if self.error_callback:
                 self.error_callback("Not connected to server")
             return False
-            
+        
+        # If we're offline, try to retrieve cached messages
+        if not self.online and self.offline_storage:
+            cached_content = self.offline_storage.get_cached_content(channel_id)
+            if cached_content and self.message_callback:
+                log_connection(f"Using cached messages for channel {channel_id}")
+                self.message_callback(cached_content['content'])
+                return True
+        
+        # Create request
         request = {
-            "type": "get_channel_users",
+            "type": "get_messages",
+            "channel_id": channel_id
+        }
+        
+        try:
+            log_connection(f"Requesting messages for channel {channel_id}")
+            self.socket.send(json.dumps(request).encode('utf-8'))
+            return True
+        except Exception as e:
+            log_connection(f"Error requesting messages: {str(e)}")
+            self._handle_connection_loss()
+            if self.error_callback:
+                self.error_callback(f"Error getting messages: {str(e)}")
+            return False
+
+    def send_message(self, channel_id, content):
+        """Send a message to a channel."""
+        if not self.connected and not self.offline_storage:
+            if self.error_callback:
+                self.error_callback("Not connected to server and offline storage not available")
+            return False
+        
+        # Store current time
+        timestamp = time.time()
+        
+        # Create message object
+        if isinstance(content, dict):
+            # Content is already a structured message (e.g., file data)
+            message = content
+            if 'timestamp' not in message:
+                message['timestamp'] = timestamp
+            if 'sender' not in message:
+                message['sender'] = self.username if self.authenticated else "visitor"
+        else:
+            # Plain text message
+            message = {
+                'content': content,
+                'sender': self.username if self.authenticated else "visitor",
+                'timestamp': timestamp
+            }
+        
+        # If offline or we're a channel host, handle differently
+        if channel_id in self.is_channel_host and self.is_channel_host[channel_id]:
+            # We're the host, broadcast to peers directly
+            if self._temp_messages:
+                new_messages = self._temp_messages + [message]
+                self.peer_manager.broadcast_content_to_peers(channel_id, new_messages)
+                # Also update UI
+                if self.message_callback:
+                    self.message_callback(new_messages)
+                # Store for future use
+                self._temp_messages = new_messages
+                return True
+        elif not self.online and self.offline_storage:
+            # Store for later sync
+            log_connection(f"Storing offline message for channel {channel_id}")
+            message['offline'] = True
+            self.offline_storage.store_offline_message(
+                channel_id,
+                message,
+                timestamp
+            )
+            
+            # Update local cache
+            cached_content = self.offline_storage.get_cached_content(channel_id)
+            if cached_content:
+                new_messages = cached_content['content'] + [message]
+                self.offline_storage.cache_channel_content(channel_id, new_messages)
+                # Update UI
+                if self.message_callback:
+                    self.message_callback(new_messages)
+            return True
+        
+        # Normal online operation - send to server
+        try:
+            # If we have cached messages, update them and sync the entire content
+            if self._temp_messages:
+                new_messages = self._temp_messages + [message]
+                request = {
+                    "type": "sync_content",
+                    "channel_id": channel_id,
+                    "content": new_messages
+                }
+            else:
+                # No cached messages, send just this message
+                request = {
+                    "type": "sync_content",
+                    "channel_id": channel_id,
+                    "content": [message]
+                }
+            
+            self.socket.send(json.dumps(request).encode('utf-8'))
+            return True
+        except Exception as e:
+            self._handle_connection_loss()
+            if self.error_callback:
+                self.error_callback(f"Error sending message: {str(e)}")
+            return False
+
+    def get_channel_host(self, channel_id):
+        """Get information about the host of a channel."""
+        if not self.connected:
+            if self.error_callback:
+                self.error_callback("Not connected to server")
+            return False
+        
+        request = {
+            "type": "get_channel_host_info",
             "channel_id": channel_id
         }
         
@@ -940,49 +869,32 @@ class ChatClient:
         except Exception as e:
             self._handle_connection_loss()
             if self.error_callback:
-                self.error_callback(f"Error getting channel users: {str(e)}")
+                self.error_callback(f"Error getting channel host: {str(e)}")
             return False
-
-    def disconnect(self):
-        """Disconnect from the server and clean up resources."""
-        if self.connected:
-            self.connected = False
-            self.online = False
-            try:
-                self.socket.close()
-            except:
-                pass
-            
-            if self.connection_callback:
-                self.connection_callback(False)
-                
-            # Close offline storage
-            if self.offline_storage:
-                self.offline_storage.close()
-                
-            # Also shut down peer manager
-            self.peer_manager.shutdown()
 
     def register_livestream(self, channel_id, livestream_port):
         """Register a livestream with the server."""
         if not self.connected or not self.authenticated:
             if self.error_callback:
-                self.error_callback("Must be authenticated to start a livestream")
+                self.error_callback("Must be authenticated to register a livestream")
             return False
-            
-        # Get local IP address
-        host_ip = socket.gethostbyname(socket.gethostname())
         
         request = {
             "type": "register_livestream",
             "channel_id": channel_id,
-            "host_ip": host_ip,
+            "host_ip": socket.gethostbyname(socket.gethostname()),
             "livestream_port": livestream_port,
             "username": self.username
         }
         
         try:
             self.socket.send(json.dumps(request).encode('utf-8'))
+            
+            # Store locally too
+            if not hasattr(self, 'livestream_ports'):
+                self.livestream_ports = {}
+            self.livestream_ports[channel_id] = livestream_port
+            
             return True
         except Exception as e:
             self._handle_connection_loss()
@@ -994,28 +906,38 @@ class ChatClient:
         """Unregister a livestream with the server."""
         if not self.connected:
             return False
-            
+        
+        channel_id = self.current_channel
+        if not channel_id:
+            return False
+        
         request = {
             "type": "unregister_livestream",
-            "channel_id": self.current_channel,
+            "channel_id": channel_id,
             "username": self.username
         }
         
         try:
             self.socket.send(json.dumps(request).encode('utf-8'))
+            
+            # Remove from local storage
+            if hasattr(self, 'livestream_ports') and channel_id in self.livestream_ports:
+                del self.livestream_ports[channel_id]
+                
             return True
         except Exception as e:
+            self._handle_connection_loss()
             if self.error_callback:
                 self.error_callback(f"Error unregistering livestream: {str(e)}")
             return False
 
     def get_active_streams(self, channel_id):
-        """Get list of active livestreams for a channel."""
+        """Get active livestreams for a channel."""
         if not self.connected:
             if self.error_callback:
                 self.error_callback("Not connected to server")
             return False
-            
+        
         request = {
             "type": "get_active_streams",
             "channel_id": channel_id
@@ -1029,3 +951,75 @@ class ChatClient:
             if self.error_callback:
                 self.error_callback(f"Error getting active streams: {str(e)}")
             return False
+
+    def get_channel_users(self, channel_id):
+        """Get users in a channel."""
+        if not self.connected:
+            if self.error_callback:
+                self.error_callback("Not connected to server")
+            return False
+        
+        request = {
+            "type": "get_channel_users",
+            "channel_id": channel_id
+        }
+        
+        try:
+            log_connection(f"Requesting user list for channel {channel_id}")
+            self.socket.send(json.dumps(request).encode('utf-8'))
+            return True
+        except Exception as e:
+            self._handle_connection_loss()
+            if self.error_callback:
+                self.error_callback(f"Error getting channel users: {str(e)}")
+            return False
+
+    def logout(self):
+        """Log out from the server."""
+        if not self.connected:
+            return False
+        
+        request = {
+            "type": "logout"
+        }
+        
+        try:
+            self.socket.send(json.dumps(request).encode('utf-8'))
+            self.authenticated = False
+            self.username = None
+            return True
+        except Exception as e:
+            self._handle_connection_loss()
+            if self.error_callback:
+                self.error_callback(f"Error logging out: {str(e)}")
+            return False
+
+    def disconnect(self):
+        """Disconnect from the server."""
+        self.connected = False
+        self.online = False
+        self.authenticated = False
+        self.username = None
+        
+        # Close socket
+        if self.socket:
+            try:
+                self.socket.close()
+            except Exception as e:
+                log_connection(f"Error closing socket: {str(e)}")
+        
+        # Close offline storage
+        if self.offline_storage:
+            try:
+                self.offline_storage.close()
+            except Exception as e:
+                log_connection(f"Error closing offline storage: {str(e)}")
+        
+        # End peer manager
+        try:
+            self.peer_manager.shutdown()
+        except Exception as e:
+            log_connection(f"Error shutting down peer manager: {str(e)}")
+        
+        if self.connection_callback:
+            self.connection_callback(False)

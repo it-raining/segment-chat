@@ -1,6 +1,6 @@
 __pycache__/
 *.pyc
 segment_chat.db
-logs/
+logs/connection_log.txt
 db/
 test_p2p.py

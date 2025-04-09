@@ -211,27 +211,6 @@ class AdminClient:
         except Exception as e:
             return False, str(e)
     
-    def restart_server(self):
-        if not self.connected or not self.authenticated:
-            return False, "Not authenticated as admin"
-            
-        request = {"type": "admin_restart_server"}
-        try:
-            self.socket.send(json.dumps(request).encode('utf-8'))
-            self.socket.settimeout(self.timeout)
-            response = json.loads(self.socket.recv(4096).decode('utf-8'))
-            
-            if response['type'] == 'admin_restart_server_response':
-                return response['success'], response['message']
-            return False, "Invalid response from server"
-        except socket.timeout:
-            return False, "Connection timed out waiting for server response"
-        except ConnectionError as e:
-            self.connected = False
-            return False, f"Connection error: {str(e)}"
-        except Exception as e:
-            return False, str(e)
-    
     def shutdown_server(self):
         if not self.connected or not self.authenticated:
             return False, "Not authenticated as admin"
@@ -445,9 +424,6 @@ class AdminApp:
         
         ttk.Button(button_frame, text="Start Server", 
                  command=self.start_server).pack(side=tk.LEFT, padx=10)
-        
-        ttk.Button(button_frame, text="Restart Server", 
-                 command=self.restart_server).pack(side=tk.LEFT, padx=10)
         
         ttk.Button(button_frame, text="Stop Server", 
                  command=self.stop_server,
@@ -835,35 +811,21 @@ class AdminApp:
                                      "Server started but connection could not be established yet. Try again in a moment.")
             else:
                 # Server still starting, try again
+                # Check if we've been trying for too long
+                if not hasattr(self, '_reconnect_count'):
+                    self._reconnect_count = 1
+                else:
+                    self._reconnect_count += 1
+                    
+                if self._reconnect_count > 10:  # After about 20 seconds of trying
+                    messagebox.showerror("Error", "Server did not start successfully after multiple attempts.")
+                    self.server_status_var.set("Offline")
+                    self._reconnect_count = 0
+                    return
+                    
                 self.root.after(2000, self.check_server_and_connect)
         except Exception as e:
             messagebox.showerror("Error", f"Failed to connect to server: {str(e)}")
-    
-    def restart_server(self):
-        if not self.server_running:
-            messagebox.showerror("Error", "Server is not running")
-            return
-        
-        if not self.client.connected:
-            # Try to connect first
-            if not self.client.connect():
-                if messagebox.askyesno("Connection Failed", 
-                                     "Cannot connect to server to send restart command. Do you want to force restart?"):
-                    self.stop_server(force=True)
-                    self.root.after(2000, self.start_server)
-                return
-        
-        success, message = self.client.restart_server()
-        if success:
-            messagebox.showinfo("Server Status", "Server restarting...")
-            self.client.disconnect()
-            self.server_running = False
-            self.server_status_var.set("Restarting...")
-            
-            # Wait a moment then try to reconnect
-            self.root.after(5000, self.check_server_and_connect)
-        else:
-            messagebox.showerror("Error", message)
     
     def stop_server(self, force=False):
         if not self.server_running and not force:

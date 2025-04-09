@@ -329,6 +329,10 @@ def handle_join_channel(client_socket, client_id, data):
             
             # Broadcast join notification
             broadcast_user_join(channel_id, username)
+            
+            # Automatically send the list of users in this channel
+            handle_get_channel_users(client_socket, {"channel_id": channel_id})
+            
             response = create_join_channel_response(True, "Joined private channel")
     else:
         # Add user to channel users
@@ -340,7 +344,15 @@ def handle_join_channel(client_socket, client_id, data):
         # Broadcast join notification
         broadcast_user_join(channel_id, username)
         
+        # Automatically send the list of users in this channel
+        handle_get_channel_users(client_socket, {"channel_id": channel_id})
+        
         response = create_join_channel_response(True, "Joined channel")
+    
+    # Log the channel users for debugging
+    with channel_users_lock:
+        log_connection(f"Channel {channel_id} users: {list(channel_users.get(channel_id, {}).keys())}")
+    
     client_socket.send(response.encode('utf-8'))
 
 def handle_leave_channel(client_socket, client_id, data):
@@ -378,6 +390,8 @@ def handle_get_channel_users(client_socket, data):
     
     with channel_users_lock:
         users = list(channel_users.get(channel_id, {}).keys())
+    
+    log_connection(f"Sending user list for channel {channel_id}: {users}")
     
     response = json.dumps({
         "type": "channel_users_response",
@@ -626,8 +640,70 @@ def broadcast_message_update(channel_id, content):
     
     log_connection(f"Broadcasted message update for channel {channel_id} to {len(client_ids)} clients")
 
+def create_get_messages_response(success, messages, message=None):
+    response = {
+        "type": "get_messages_response",
+        "success": success,
+        "messages": messages
+    }
+    if message:
+        response["message"] = message
+    return json.dumps(response)
+
+def handle_get_messages(client_socket, channel_id):
+    """Handle request to get messages for a channel with better error handling."""
+    log_connection(f"Retrieving messages for channel {channel_id}")
+    
+    try:
+        cursor.execute("SELECT content FROM channels WHERE id=?", (channel_id,))
+        result = cursor.fetchone()
+        
+        if result:
+            content = result[0]
+            # Handle NULL/None content
+            if content is None:
+                log_connection(f"Channel {channel_id} has NULL content, initializing with empty array")
+                # Initialize with empty array and update the database
+                empty_content = json.dumps([])
+                cursor.execute("UPDATE channels SET content=? WHERE id=?", (empty_content, channel_id))
+                conn.commit()
+                messages = []
+            else:
+                try:
+                    messages = json.loads(content)
+                except json.JSONDecodeError as e:
+                    log_connection(f"Error parsing stored messages for channel {channel_id}: {e}")
+                    # Reset to empty array on parsing error
+                    messages = []
+                    cursor.execute("UPDATE channels SET content=? WHERE id=?", (json.dumps(messages), channel_id))
+                    conn.commit()
+            
+            log_connection(f"Sending {len(messages)} messages for channel {channel_id}")
+            response = create_get_messages_response(True, messages)
+        else:
+            log_connection(f"Channel {channel_id} not found")
+            response = create_get_messages_response(False, [], "Channel not found")
+    except Exception as e:
+        log_connection(f"Error getting messages from DB: {e}")
+        response = create_get_messages_response(False, [], f"Error getting messages: {e}")
+    
+    try:
+        client_socket.send(response.encode('utf-8'))
+    except ConnectionError as e:
+        log_connection(f"Failed to send messages to client: {e}")
+
 def handle_admin_login(client_socket, client_id, data):
     """Handle admin login request."""
+    with users_lock:
+        if active_users.get(client_id, {}).get("authenticated", False):
+            response = {
+                "type": "admin_login_response",
+                "success": False,
+                "message": "Already authenticated"
+            }
+            client_socket.send(json.dumps(response).encode('utf-8'))
+            return
+    
     username = data['username']
     password = data['password']
     
@@ -778,49 +854,6 @@ def handle_admin_delete_user(client_socket, client_id, data):
     
     client_socket.send(json.dumps(response).encode('utf-8'))
 
-def handle_admin_restart_server(client_socket, client_id):
-    """Handle request to restart the server."""
-    # Verify admin authentication
-    with users_lock:
-        is_admin = active_users.get(client_id, {}).get("is_admin", False)
-    
-    if not is_admin:
-        response = {
-            "type": "admin_restart_server_response",
-            "success": False,
-            "message": "Admin privileges required"
-        }
-        client_socket.send(json.dumps(response).encode('utf-8'))
-        return
-    
-    # Send response before restarting
-    response = {
-        "type": "admin_restart_server_response",
-        "success": True,
-        "message": "Server restarting..."
-    }
-    client_socket.send(json.dumps(response).encode('utf-8'))
-    
-    # Set shutdown flag with restart intention
-    global shutdown_flag
-    log_connection("Admin requested server restart")
-    shutdown_flag.set()
-    
-    # Start a new process to restart the server after a short delay
-    import subprocess
-    import sys
-    import os
-    
-    def restart_server():
-        time.sleep(1)  # Give time for connections to close
-        script_path = os.path.abspath(__file__)
-        subprocess.Popen([sys.executable, script_path])
-        
-    threading.Thread(target=restart_server, daemon=True).start()
-    
-    # Force exit after a few seconds
-    threading.Timer(5, lambda: os._exit(0)).start()
-
 def handle_admin_shutdown_server(client_socket, client_id):
     """Handle request to shut down the server."""
     # Verify admin authentication
@@ -852,6 +885,91 @@ def handle_admin_shutdown_server(client_socket, client_id):
     # Force exit after a few seconds
     threading.Timer(5, lambda: os._exit(0)).start()
 
+def handle_admin_create_channel(client_socket, client_id, data):
+    """Handle request to create a new channel by an admin."""
+    # Verify admin authentication
+    with users_lock:
+        is_admin = active_users.get(client_id, {}).get("is_admin", False)
+    
+    if not is_admin:
+        response = {
+            "type": "admin_create_channel_response",
+            "success": False,
+            "message": "Admin privileges required"
+        }
+        client_socket.send(json.dumps(response).encode('utf-8'))
+        return
+    
+    channel_id = data['channel_id']
+    is_public = data.get('is_public', True)
+    
+    try:
+        # Initialize with proper empty JSON array
+        empty_content = json.dumps([])
+        cursor.execute("INSERT INTO channels (id, is_public, content) VALUES (?, ?, ?)", 
+                     (channel_id, int(is_public), empty_content))
+        conn.commit()
+        response = {
+            "type": "admin_create_channel_response",
+            "success": True,
+            "message": f"Channel {channel_id} created successfully"
+        }
+    except sqlite3.IntegrityError:
+        response = {
+            "type": "admin_create_channel_response",
+            "success": False,
+            "message": "Channel ID already exists"
+        }
+    except Exception as e:
+        response = {
+            "type": "admin_create_channel_response",
+            "success": False,
+            "message": f"Error creating channel: {str(e)}"
+        }
+    
+    client_socket.send(json.dumps(response).encode('utf-8'))
+
+def handle_admin_delete_channel(client_socket, client_id, data):
+    """Handle request to delete a channel by an admin."""
+    # Verify admin authentication
+    with users_lock:
+        is_admin = active_users.get(client_id, {}).get("is_admin", False)
+    
+    if not is_admin:
+        response = {
+            "type": "admin_delete_channel_response",
+            "success": False,
+            "message": "Admin privileges required"
+        }
+        client_socket.send(json.dumps(response).encode('utf-8'))
+        return
+    
+    channel_id = data['channel_id']
+    
+    try:
+        cursor.execute("DELETE FROM channels WHERE id=?", (channel_id,))
+        if cursor.rowcount > 0:
+            conn.commit()
+            response = {
+                "type": "admin_delete_channel_response",
+                "success": True,
+                "message": f"Channel {channel_id} deleted successfully"
+            }
+        else:
+            response = {
+                "type": "admin_delete_channel_response",
+                "success": False,
+                "message": "Channel not found"
+            }
+    except Exception as e:
+        response = {
+            "type": "admin_delete_channel_response",
+            "success": False,
+            "message": f"Error deleting channel: {str(e)}"
+        }
+    
+    client_socket.send(json.dumps(response).encode('utf-8'))
+
 def handle_client(client_socket):
     client_id = f"{threading.current_thread().ident}"
     client_address = client_socket.getpeername()
@@ -871,186 +989,206 @@ def handle_client(client_socket):
                 log_connection(f"Client {client_id} disconnected")
                 break
             
-            data = json.loads(message)
+            try:
+                data = json.loads(message)
+            except json.JSONDecodeError:
+                log_connection(f"Received invalid JSON from client {client_id}")
+                response = json.dumps({"type": "error", "message": "Invalid JSON"}).encode('utf-8')
+                client_socket.send(response)
+                continue
+            
             request_type = data.get('type', 'unknown')
             log_connection(f"Received {request_type} request from client {client_id}")
             
-            # Handle different message types
-            if data['type'] == 'submit_info':
-                with peers_lock:
-                    peers.append({'ip': data['ip'], 'port': data['port']})
-                response = create_submit_info_response(True, "Registration successful")
-                client_socket.send(response.encode('utf-8'))
-            
-            # Handle admin-specific message types
-            elif data['type'] == 'admin_login':
-                handle_admin_login(client_socket, client_id, data)
-            
-            elif data['type'] == 'get_users':
-                handle_get_users(client_socket, client_id)
-                
-            elif data['type'] == 'admin_create_user':
-                handle_admin_create_user(client_socket, client_id, data)
-                
-            elif data['type'] == 'admin_delete_user':
-                handle_admin_delete_user(client_socket, client_id, data)
-                
-            elif data['type'] == 'admin_restart_server':
-                handle_admin_restart_server(client_socket, client_id)
-                
-            elif data['type'] == 'admin_shutdown_server':
-                handle_admin_shutdown_server(client_socket, client_id)
-                
-            # Handle regular client message types
-            elif data['type'] == 'get_list':
-                with peers_lock:
-                    response = create_get_list_response(peers)
-                client_socket.send(response.encode('utf-8'))
-            
-            elif data['type'] == 'login':
-                username = data['username']
-                password = data['password']
-                cursor.execute("SELECT * FROM users WHERE username=? AND password=?", (username, password))
-                if cursor.fetchone():
-                    with users_lock:
-                        active_users[client_id] = {"authenticated": True, "username": username}
-                    response = create_login_response(True, "Login successful")
-                else:
-                    response = create_login_response(False, "Invalid credentials")
-                client_socket.send(response.encode('utf-8'))
-            
-            elif data['type'] == 'register':
-                username = data['username']
-                password = data['password']
-                try:
-                    cursor.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, password))
-                    conn.commit()
-                    response = create_register_response(True, "Registration successful")
-                except sqlite3.IntegrityError:
-                    response = create_register_response(False, "Username already exists")
-                client_socket.send(response.encode('utf-8'))
-            
-            elif data['type'] == 'create_channel':
-                # Check if user is authenticated and is an admin
+            # Enforce authentication for sensitive operations
+            if request_type in ['join_channel', 'send_message', 'create_channel']:
                 with users_lock:
-                    is_authenticated = active_users.get(client_id, {}).get("authenticated", False)
-                    is_admin = active_users.get(client_id, {}).get("is_admin", False)
-                
-                if not is_authenticated:
-                    response = create_create_channel_response(False, "Authentication required")
-                elif not is_admin:
-                    response = create_create_channel_response(False, "Admin permission required to create channels")
-                else:
-                    channel_id = data['channel_id']
-                    host_ip = data['host_ip']
-                    host_port = data['host_port']
-                    is_public = data.get('is_public', 1)  # Default to public
-                    
-                    try:
-                        cursor.execute("INSERT INTO channels (id, host_ip, host_port, content, is_public) VALUES (?, ?, ?, ?, ?)", 
-                                       (channel_id, host_ip, host_port, json.dumps([]), is_public))
-                        conn.commit()
-                        response = create_create_channel_response(True, "Channel created")
-                    except sqlite3.IntegrityError:
-                        response = create_create_channel_response(False, "Channel already exists")
-                client_socket.send(response.encode('utf-8'))
+                    if not active_users.get(client_id, {}).get("authenticated", False):
+                        response = {
+                            "type": f"{request_type}_response",
+                            "success": False,
+                            "message": "Authentication required"
+                        }
+                        client_socket.send(json.dumps(response).encode('utf-8'))
+                        continue
             
-            elif data['type'] == 'join_channel':
-                handle_join_channel(client_socket, client_id, data)
-            
-            elif data['type'] == 'leave_channel':
-                handle_leave_channel(client_socket, client_id, data)
-            
-            elif data['type'] == 'get_channel_users':
-                handle_get_channel_users(client_socket, data)
-            
-            elif data['type'] == 'get_channel_host':
-                channel_id = data['channel_id']
-                cursor.execute("SELECT host_ip, host_port FROM channels WHERE id=?", (channel_id,))
-                result = cursor.fetchone()
-                if result:
-                    response = create_get_channel_host_response(True, result[0], result[1])
-                else:
-                    response = create_get_channel_host_response(False, message="Channel not found")
-                client_socket.send(response.encode('utf-8'))
-            
-            elif data['type'] == 'sync_content':
-                channel_id = data['channel_id']
-                content = data['content']
-                
-                # Verify if user can post in this channel
-                cursor.execute("SELECT is_public FROM channels WHERE id=?", (channel_id,))
-                result = cursor.fetchone()
-                
-                with users_lock:
-                    is_authenticated = active_users.get(client_id, {}).get("authenticated", False)
-                    username = active_users.get(client_id, {}).get("username", "visitor")
-                
-                # Enforce authentication requirement for posting messages
-                if not is_authenticated:
-                    response = create_sync_content_response(False, "Authentication required to post messages")
+            try:
+                # Handle different message types
+                if data['type'] == 'submit_info':
+                    with peers_lock:
+                        peers.append({'ip': data['ip'], 'port': data['port']})
+                    response = create_submit_info_response(True, "Registration successful")
                     client_socket.send(response.encode('utf-8'))
-                    continue
                 
-                # Add sender information to the message
-                for msg in content:
-                    if 'sender' not in msg:
-                        msg['sender'] = username
+                # Handle admin-specific message types
+                elif data['type'] == 'admin_login':
+                    handle_admin_login(client_socket, client_id, data)
                 
-                cursor.execute("UPDATE channels SET content=? WHERE id=?", (json.dumps(content), channel_id))
-                conn.commit()
-                response = create_sync_content_response(True, "Content synced")
-                client_socket.send(response.encode('utf-8'))
+                elif data['type'] == 'get_users':
+                    handle_get_users(client_socket, client_id)
+                    
+                elif data['type'] == 'admin_create_user':
+                    handle_admin_create_user(client_socket, client_id, data)
+                    
+                elif data['type'] == 'admin_delete_user':
+                    handle_admin_delete_user(client_socket, client_id, data)
+                    
+                elif data['type'] == 'admin_shutdown_server':
+                    handle_admin_shutdown_server(client_socket, client_id)
+                    
+                elif data['type'] == 'admin_create_channel':
+                    handle_admin_create_channel(client_socket, client_id, data)
+                    
+                elif data['type'] == 'admin_delete_channel':
+                    handle_admin_delete_channel(client_socket, client_id, data)
+                    
+                # Handle regular client message types
+                elif data['type'] == 'get_list':
+                    with peers_lock:
+                        response = create_get_list_response(peers)
+                    client_socket.send(response.encode('utf-8'))
                 
-                # Broadcast message update to all clients in this channel
-                broadcast_message_update(channel_id, content)
-            
-            elif data['type'] == 'get_channels':
-                # Return list of all channels, identifying which are public vs private
-                cursor.execute("SELECT id, is_public FROM channels")
-                channels = [{"id": row[0], "is_public": bool(row[1])} for row in cursor.fetchall()]
-                response = create_get_channels_response(channels)
-                client_socket.send(response.encode('utf-8'))
-            
-            elif data['type'] == 'get_messages':
-                channel_id = data['channel_id']
-                log_connection(f"Client {client_id} requested messages for channel {channel_id}")
+                elif data['type'] == 'login':
+                    username = data['username']
+                    password = data['password']
+                    cursor.execute("SELECT * FROM users WHERE username=? AND password=?", (username, password))
+                    if cursor.fetchone():
+                        with users_lock:
+                            active_users[client_id] = {"authenticated": True, "username": username}
+                        response = create_login_response(True, "Login successful")
+                    else:
+                        response = create_login_response(False, "Invalid credentials")
+                    client_socket.send(response.encode('utf-8'))
                 
-                cursor.execute("SELECT content FROM channels WHERE id=?", (channel_id,))
-                result = cursor.fetchone()
-                if result:
-                    messages = json.loads(result[0])
-                    log_connection(f"Sending {len(messages)} messages for channel {channel_id}")
-                    response = create_get_messages_response(True, messages)
-                else:
-                    log_connection(f"Channel {channel_id} not found")
-                    response = create_get_messages_response(False, [], "Channel not found")
+                elif data['type'] == 'register':
+                    username = data['username']
+                    password = data['password']
+                    try:
+                        cursor.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, password))
+                        conn.commit()
+                        response = create_register_response(True, "Registration successful")
+                    except sqlite3.IntegrityError:
+                        response = create_register_response(False, "Username already exists")
+                    client_socket.send(response.encode('utf-8'))
                 
-                client_socket.send(response.encode('utf-8'))
-            
-            elif data['type'] == 'logout':
-                with users_lock:
-                    active_users[client_id] = {"authenticated": False, "username": None}
-                client_socket.send(json.dumps({"type": "logout", "success": True}).encode('utf-8'))
-            
-            elif data['type'] == 'host_heartbeat':
-                handle_host_heartbeat(client_socket, client_id, data)
+                elif data['type'] == 'create_channel':
+                    # Check if user is authenticated
+                    with users_lock:
+                        is_authenticated = active_users.get(client_id, {}).get("authenticated", False)
+                    
+                    if not is_authenticated:
+                        response = create_create_channel_response(False, "Authentication required")
+                    else:
+                        channel_id = data['channel_id']
+                        host_ip = data['host_ip']
+                        host_port = data['host_port']
+                        is_public = data.get('is_public', 1)  # Default to public
+                        
+                        try:
+                            # Initialize with proper empty JSON array
+                            empty_content = json.dumps([])
+                            cursor.execute("INSERT INTO channels (id, host_ip, host_port, content, is_public) VALUES (?, ?, ?, ?, ?)", 
+                                           (channel_id, host_ip, host_port, empty_content, is_public))
+                            conn.commit()
+                            response = create_create_channel_response(True, "Channel created")
+                        except sqlite3.IntegrityError:
+                            response = create_create_channel_response(False, "Channel already exists")
+                    client_socket.send(response.encode('utf-8'))
+                
+                elif data['type'] == 'join_channel':
+                    handle_join_channel(client_socket, client_id, data)
+                
+                elif data['type'] == 'leave_channel':
+                    handle_leave_channel(client_socket, client_id, data)
+                
+                elif data['type'] == 'get_channel_users':
+                    handle_get_channel_users(client_socket, data)
+                
+                elif data['type'] == 'get_channel_host':
+                    channel_id = data['channel_id']
+                    cursor.execute("SELECT host_ip, host_port FROM channels WHERE id=?", (channel_id,))
+                    result = cursor.fetchone()
+                    if result:
+                        response = create_get_channel_host_response(True, result[0], result[1])
+                    else:
+                        response = create_get_channel_host_response(False, message="Channel not found")
+                    client_socket.send(response.encode('utf-8'))
+                
+                elif data['type'] == 'sync_content':
+                    channel_id = data['channel_id']
+                    content = data['content']
+                    
+                    # Verify if user can post in this channel
+                    cursor.execute("SELECT is_public FROM channels WHERE id=?", (channel_id,))
+                    result = cursor.fetchone()
+                    
+                    with users_lock:
+                        is_authenticated = active_users.get(client_id, {}).get("authenticated", False)
+                        username = active_users.get(client_id, {}).get("username", "visitor")
+                    
+                    # Enforce authentication requirement for posting messages
+                    if not is_authenticated:
+                        response = create_sync_content_response(False, "Authentication required to post messages")
+                        client_socket.send(response.encode('utf-8'))
+                        continue
+                    
+                    # Add sender information to the message
+                    for msg in content:
+                        if 'sender' not in msg:
+                            msg['sender'] = username
+                    
+                    cursor.execute("UPDATE channels SET content=? WHERE id=?", (json.dumps(content), channel_id))
+                    conn.commit()
+                    response = create_sync_content_response(True, "Content synced")
+                    client_socket.send(response.encode('utf-8'))
+                    
+                    # Broadcast message update to all clients in this channel
+                    broadcast_message_update(channel_id, content)
+                
+                elif data['type'] == 'get_channels':
+                    # Return list of all channels, identifying which are public vs private
+                    cursor.execute("SELECT id, is_public FROM channels")
+                    channels = [{"id": row[0], "is_public": bool(row[1])} for row in cursor.fetchall()]
+                    response = create_get_channels_response(channels)
+                    client_socket.send(response.encode('utf-8'))
+                
+                elif data['type'] == 'get_messages':
+                    channel_id = data['channel_id']
+                    log_connection(f"Client {client_id} requested messages for channel {channel_id}")
+                    handle_get_messages(client_socket, channel_id)
+                
+                elif data['type'] == 'logout':
+                    with users_lock:
+                        active_users[client_id] = {"authenticated": False, "username": None}
+                    client_socket.send(json.dumps({"type": "logout", "success": True}).encode('utf-8'))
+                
+                elif data['type'] == 'host_heartbeat':
+                    handle_host_heartbeat(client_socket, client_id, data)
 
-            elif data['type'] == 'host_register':
-                handle_host_register(client_socket, client_id, data)
+                elif data['type'] == 'host_register':
+                    handle_host_register(client_socket, client_id, data)
 
-            elif data['type'] == 'get_channel_host_info':
-                handle_get_channel_host_info(client_socket, data)
+                elif data['type'] == 'get_channel_host_info':
+                    handle_get_channel_host_info(client_socket, data)
 
-            elif data['type'] == 'register_livestream':
-                handle_register_livestream(client_socket, client_id, data)
-                
-            elif data['type'] == 'unregister_livestream':
-                handle_unregister_livestream(client_socket, client_id, data)
-                
-            elif data['type'] == 'get_active_streams':
-                handle_get_active_streams(client_socket, data)
+                elif data['type'] == 'register_livestream':
+                    handle_register_livestream(client_socket, client_id, data)
+                    
+                elif data['type'] == 'unregister_livestream':
+                    handle_unregister_livestream(client_socket, client_id, data)
+                    
+                elif data['type'] == 'get_active_streams':
+                    handle_get_active_streams(client_socket, data)
             
+            except Exception as e:
+                log_connection(f"Error processing request: {e}")
+                try:
+                    response = json.dumps({"type": "error", "message": f"Server error: {e}"}).encode('utf-8')
+                    client_socket.send(response)
+                except ConnectionError:
+                    log_connection(f"Failed to send error response to client {client_id}")
+                    break
+        
         except socket.timeout:
             log_connection(f"Client {client_id} connection timed out")
             break

@@ -157,8 +157,8 @@ class LivestreamClient:
         if self.host_socket:
             try:
                 self.host_socket.close()
-            except:
-                pass
+            except OSError:
+                pass  # Ignore errors if socket is already closed
             self.host_socket = None
         if self.server_client and self.server_client.connected:
             self.server_client.unregister_livestream(self.host_port)
@@ -243,8 +243,8 @@ class LivestreamClient:
         if self.view_socket:
             try:
                 self.view_socket.close()
-            except:
-                pass
+            except OSError:
+                pass  # Ignore errors if socket is already closed
             self.view_socket = None
         log_connection("Stopped livestream viewing")
         if self.status_callback:

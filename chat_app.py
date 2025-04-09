@@ -303,6 +303,22 @@ class ChatApp:
         # Initialize offline storage after login
         if self.client.authenticated:
             self.client.initialize_offline_storage()
+
+    def admin_login(self):
+        """Login as an admin and access the chat application."""
+        username = self.username_entry.get().strip()
+        password = self.password_entry.get().strip()
+        
+        if not username or not password:
+            messagebox.showerror("Error", "Please enter username and password")
+            return
+        
+        log_connection(f"Admin attempting login: {username}")
+        self.client.admin_login(username, password)
+        
+        # Initialize offline storage after login
+        if self.client.authenticated:
+            self.client.initialize_offline_storage()
     
     def register(self):
         username = self.username_entry.get().strip()
@@ -389,6 +405,11 @@ class ChatApp:
         
         # Update peers list for this channel
         self.client.current_channel = channel_id
+        
+        # Request the list of users in this channel
+        self.client.get_channel_users(channel_id)
+        
+        # Update peers list with any existing data we have
         self.update_peers_list()
     
     def create_channel(self):
@@ -419,131 +440,132 @@ class ChatApp:
             self.update_job = None
 
     def poll_messages(self):
-        """Poll for new messages in the current channel"""
+        """Poll for new messages in the current channel."""
         if not self.client.current_channel:
             return
         
         log_connection(f"Polling messages for channel {self.client.current_channel}")
-        
-        # Make sure we're fetching for the correct current channel
         channel_id = self.client.current_channel
         
-        # Clear previous update job to avoid race conditions
-        if self.update_job:
-            self.root.after_cancel(self.update_job)
-            self.update_job = None
+        # Retry limit
+        retry_limit = 3
+        retries = 0
         
-        # Request messages from the server
-        success = self.client.get_messages(channel_id)
-        if not success:
-            log_connection(f"Failed to request messages for channel {channel_id}")
-            
-            # Try again in a moment if still connected
-            if self.client.connected:
-                self.update_job = self.root.after(self.update_interval, self.start_message_polling)
+        while retries < retry_limit:
+            success = self.client.get_messages(channel_id)
+            if success:
+                break
+            retries += 1
+            time.sleep(1)  # Wait before retrying
+        
+        if retries == retry_limit:
+            log_connection(f"Failed to poll messages for channel {channel_id} after {retry_limit} retries")
 
     def update_messages(self, messages):
         """Update the UI with new messages, including support for images."""
         if not messages:
             log_connection("Received empty messages list")
             return
-            
-        log_connection(f"Updating UI with {len(messages)} messages")
         
-        # Only update if there are new messages to avoid UI flicker
-        if len(messages) != self.last_message_count:
-            self.last_message_count = len(messages)
+        try:
+            log_connection(f"Updating UI with {len(messages)} messages")
             
-            # Clear existing messages
-            for widget in self.messages_inner.winfo_children():
-                widget.destroy()
-            
-            # Store messages temporarily for sending new ones - with safer initialization
-            if not hasattr(self.client, '_temp_messages'):
-                self.client._temp_messages = []
-            self.client._temp_messages = messages
-            
-            # Create a container to store PhotoImage references to prevent garbage collection
-            if not hasattr(self, '_image_references'):
-                self._image_references = []
-            else:
-                self._image_references.clear()
-            
-            # Add messages to the chat area
-            for msg in messages:
-                message_frame = ttk.Frame(self.messages_inner, style='TFrame')
-                message_frame.pack(fill=tk.X, pady=5, padx=5, anchor=tk.W)
+            # Only update if there are new messages to avoid UI flicker
+            if len(messages) != self.last_message_count:
+                self.last_message_count = len(messages)
                 
-                sender = msg.get('sender', 'Unknown')
-                content = msg.get('content', '')
-                timestamp = msg.get('timestamp', 0)
-                is_offline = msg.get('offline', False)
+                # Clear existing messages
+                for widget in self.messages_inner.winfo_children():
+                    widget.destroy()
                 
-                # Format timestamp
-                time_str = datetime.datetime.fromtimestamp(timestamp).strftime('%I:%M %p')
+                # Store messages temporarily for sending new ones - with safer initialization
+                if not hasattr(self.client, '_temp_messages'):
+                    self.client._temp_messages = []
+                self.client._temp_messages = messages
                 
-                # Show sender with offline indicator if needed
-                sender_text = f"{sender}{' (sent offline)' if is_offline else ''}"
-                sender_label = ttk.Label(message_frame, text=sender_text, 
-                                      foreground="#0000ff", font=("Arial", 10, "bold"))
-                sender_label.pack(anchor=tk.W)
-                
-                time_label = ttk.Label(message_frame, text=time_str, 
-                                     foreground="#000000", font=("Arial", 8))
-                time_label.pack(anchor=tk.W)
-                
-                # Check content structure and log it for debugging
-                log_connection(f"Message content type: {type(content)}")
-                if isinstance(content, dict):
-                    log_connection(f"Message content keys: {content.keys()}")
-                
-                # Check if content itself is a dict and has file_type (direct message format)
-                if isinstance(content, dict) and 'file_type' in content:
-                    file_type = content.get('file_type')
-                    file_name = content.get('file_name', 'unknown')
-                    file_data = content.get('file_data', '')
-                    
-                    # Show file info
-                    file_info = ttk.Label(message_frame, text=f"Shared file: {file_name}",
-                                       foreground="#000000")
-                    file_info.pack(anchor=tk.W, pady=(2, 0))
-                    
-                    # For images, try to display them
-                    if file_type == 'image' and file_data:
-                        log_connection(f"Found image in message: {file_name}")
-                        self._display_image(message_frame, file_data, file_info)
-                
-                # Regular text message
-                elif isinstance(content, str):
-                    content_label = ttk.Label(message_frame, text=content, 
-                                          wraplength=500, foreground="#000000")
-                    content_label.pack(anchor=tk.W, pady=(2, 0))
-                
-                # Handle case where the message itself might have file data
-                elif isinstance(msg, dict) and 'file_type' in msg:
-                    file_type = msg.get('file_type')
-                    file_name = msg.get('file_name', 'unknown')
-                    file_data = msg.get('file_data', '')
-                    
-                    # Show file info
-                    file_info = ttk.Label(message_frame, text=f"Shared file: {file_name}",
-                                       foreground="#000000")
-                    file_info.pack(anchor=tk.W, pady=(2, 0))
-                    
-                    # For images, try to display them
-                    if file_type == 'image' and file_data:
-                        log_connection(f"Found image in message object: {file_name}")
-                        self._display_image(message_frame, file_data, file_info)
+                # Create a container to store PhotoImage references to prevent garbage collection
+                if not hasattr(self, '_image_references'):
+                    self._image_references = []
                 else:
-                    # Fallback for any other type of content
-                    content_str = str(content)
-                    content_label = ttk.Label(message_frame, text=content_str, 
-                                          wraplength=500, foreground="#000000")
-                    content_label.pack(anchor=tk.W, pady=(2, 0))
-            
-            # Scroll to bottom            
-            self.messages_canvas.update_idletasks()
-            self.messages_canvas.yview_moveto(1.0)
+                    self._image_references.clear()
+                
+                # Add messages to the chat area
+                for msg in messages:
+                    message_frame = ttk.Frame(self.messages_inner, style='TFrame')
+                    message_frame.pack(fill=tk.X, pady=5, padx=5, anchor=tk.W)
+                    
+                    sender = msg.get('sender', 'Unknown')
+                    content = msg.get('content', '')
+                    timestamp = msg.get('timestamp', 0)
+                    is_offline = msg.get('offline', False)
+                    
+                    # Format timestamp
+                    time_str = datetime.datetime.fromtimestamp(timestamp).strftime('%I:%M %p')
+                    
+                    # Show sender with offline indicator if needed
+                    sender_text = f"{sender}{' (sent offline)' if is_offline else ''}"
+                    sender_label = ttk.Label(message_frame, text=sender_text, 
+                                          foreground="#0000ff", font=("Arial", 10, "bold"))
+                    sender_label.pack(anchor=tk.W)
+                    
+                    time_label = ttk.Label(message_frame, text=time_str, 
+                                         foreground="#000000", font=("Arial", 8))
+                    time_label.pack(anchor=tk.W)
+                    
+                    # Check content structure and log it for debugging
+                    log_connection(f"Message content type: {type(content)}")
+                    if isinstance(content, dict):
+                        log_connection(f"Message content keys: {content.keys()}")
+                    
+                    # Check if content itself is a dict and has file_type (direct message format)
+                    if isinstance(content, dict) and 'file_type' in content:
+                        file_type = content.get('file_type')
+                        file_name = content.get('file_name', 'unknown')
+                        file_data = content.get('file_data', '')
+                        
+                        # Show file info
+                        file_info = ttk.Label(message_frame, text=f"Shared file: {file_name}",
+                                           foreground="#000000")
+                        file_info.pack(anchor=tk.W, pady=(2, 0))
+                        
+                        # For images, try to display them
+                        if file_type == 'image' and file_data:
+                            log_connection(f"Found image in message: {file_name}")
+                            self._display_image(message_frame, file_data, file_info)
+                    
+                    # Regular text message
+                    elif isinstance(content, str):
+                        content_label = ttk.Label(message_frame, text=content, 
+                                              wraplength=500, foreground="#000000")
+                        content_label.pack(anchor=tk.W, pady=(2, 0))
+                    
+                    # Handle case where the message itself might have file data
+                    elif isinstance(msg, dict) and 'file_type' in msg:
+                        file_type = msg.get('file_type')
+                        file_name = msg.get('file_name', 'unknown')
+                        file_data = msg.get('file_data', '')
+                        
+                        # Show file info
+                        file_info = ttk.Label(message_frame, text=f"Shared file: {file_name}",
+                                           foreground="#000000")
+                        file_info.pack(anchor=tk.W, pady=(2, 0))
+                        
+                        # For images, try to display them
+                        if file_type == 'image' and file_data:
+                            log_connection(f"Found image in message object: {file_name}")
+                            self._display_image(message_frame, file_data, file_info)
+                    else:
+                        # Fallback for any other type of content
+                        content_str = str(content)
+                        content_label = ttk.Label(message_frame, text=content_str, 
+                                              wraplength=500, foreground="#000000")
+                        content_label.pack(anchor=tk.W, pady=(2, 0))
+                
+                # Scroll to bottom            
+                self.messages_canvas.update_idletasks()
+                self.messages_canvas.yview_moveto(1.0)
+        except Exception as e:
+            log_connection(f"Error updating messages: {str(e)}")
 
     def _display_image(self, message_frame, file_data, file_info):
         """Helper function to display an image from base64 data."""
@@ -784,6 +806,10 @@ class ChatApp:
         # Get users from channel_users tracking
         if channel_id in self.client.channel_users:
             channel_users = self.client.channel_users[channel_id]
+            
+            # Log the users we're displaying for debugging
+            log_connection(f"Channel users in {channel_id}: {channel_users}")
+            
             for username in channel_users:
                 # Skip our own username
                 if username == self.client.username:
