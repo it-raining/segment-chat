@@ -1,4 +1,5 @@
 import tkinter as tk
+from tkinter import Menu
 from tkinter import ttk, messagebox, simpledialog, filedialog
 import threading
 import time
@@ -18,37 +19,48 @@ class ChatApp:
         
         # Configure style with black text for better readability
         self.style = ttk.Style()
-        self.style.configure('TFrame', background='#36393f')
-        self.style.configure('TLabel', background='#36393f', foreground='#000000')
+        self.style.theme_use("clam") 
+        self.style.configure('TFrame', background='#2f3136')
+        self.style.configure('TLabel', background='#2f3136', foreground='#ffffff', font=('Segoe UI', 10))
         
         # Enhanced button styles with more contrast and visibility
         self.style.configure('TButton', 
                           background='#7289da', 
-                          foreground='#000000',
-                          font=('Arial', 10, 'bold'),
+                          foreground='#ffffff',
+                          font=('Segoe UI', 10, 'bold'),
                           padding=6)
         
         self.style.configure('Channel.TButton', 
-                          background='#2f3136', 
-                          foreground='#000000',
-                          font=('Arial', 10),
+                          background='#40444b', 
+                          foreground='#dddddd',
+                          font=('Segoe UI', 10),
                           padding=8)
         
         # Create a distinct style for important buttons
         self.style.configure('Action.TButton', 
-                          background='#5865f2',
-                          foreground='#000000',
-                          font=('Arial', 10, 'bold'),
+                          background='#7289da',
+                          foreground='#ffffff',
+                          font=('Segoe UI', 10, 'bold'),
                           padding=6)
+        
+        self.style.configure('Logout.TButton', 
+                     font=("Segoe UI", 10, "bold"), 
+                     background='#7289da', 
+                     foreground='#ffffff', 
+                     padding=6)
         
         # Add hover-like effect for buttons
         self.style.map('Channel.TButton',
                     foreground=[('active', '#ffffff'), ('pressed', '#ffffff')],
-                    background=[('active', '#393c43'), ('pressed', '#393c43')])
+                    background=[('active', '#5865f2'), ('pressed', '#3d55c0')])
         
         self.style.map('TButton',
                     foreground=[('active', '#ffffff'), ('pressed', '#ffffff')],
-                    background=[('active', '#5865f2'), ('pressed', '#5865f2')])
+                    background=[('active', '#5865f2'), ('pressed', '#3d55c0')])
+        
+        self.style.map('Action.TButton',
+                    background=[('active', '#5865f2'), ('pressed', '#3d55c0')],
+                    foreground=[('active', '#ffffff'), ('pressed', '#ffffff')])
         
         # Real-time updates
         self.update_interval = 1000  # Update every 1 second (1000ms)
@@ -84,7 +96,7 @@ class ChatApp:
         self.main_frame = ttk.Frame(root)
         self.main_frame.pack(fill=tk.BOTH, expand=True)
         
-        self.login_frame = ttk.Frame(self.main_frame, padding=20)
+        self.login_frame = tk.Frame(self.main_frame, bg="#2f3136", padx=20, pady=20)
         self.chat_frame = ttk.Frame(self.main_frame)
         
         # Initialize login UI
@@ -98,8 +110,8 @@ class ChatApp:
         
         # Connection status
         self.status_var = tk.StringVar(value="Disconnected")
-        self.status_label = ttk.Label(root, textvariable=self.status_var, anchor=tk.W)
-        self.status_label.pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=2)
+        #self.status_label = ttk.Label(root, textvariable=self.status_var, anchor=tk.W)
+        #self.status_label.pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=2)
         
         # Add connection status indicator
         self.setup_connection_indicator()
@@ -130,31 +142,31 @@ class ChatApp:
         self.status_label.pack(side=tk.LEFT, padx=5)
         
         # Add reconnect button
-        self.reconnect_btn = ttk.Button(self.connection_frame, text="Reconnect", 
-                                      command=self.reconnect, width=10)
-        self.reconnect_btn.pack(side=tk.RIGHT, padx=10)
+        #self.reconnect_btn = ttk.Button(self.connection_frame, text="🔄 Reconnect", 
+        #                              command=self.reconnect, width=15)
+        #self.reconnect_btn.pack(side=tk.RIGHT, padx=10)
     
     def setup_login_ui(self):
-        ttk.Label(self.login_frame, text="SegmentChat", font=("Arial", 24)).pack(pady=20)
+        ttk.Label(self.login_frame, text="SegmentChat", font=("Segoe UI", 24, "bold"), foreground="#7289da", background="#2f3136").pack(pady=20)
         
-        ttk.Label(self.login_frame, text="Username").pack(pady=(10, 2))
+        ttk.Label(self.login_frame, text="Username", font=("Segoe UI", 10),foreground="#c0c0c0", background="#2f3136").pack(pady=(10, 2))
         self.username_entry = ttk.Entry(self.login_frame, width=30)
         self.username_entry.pack(pady=(0, 10))
         
-        ttk.Label(self.login_frame, text="Password").pack(pady=(10, 2))
+        ttk.Label(self.login_frame, text="Password", font=("Segoe UI", 10), foreground="#c0c0c0", background="#2f3136").pack(pady=(10, 2))
         self.password_entry = ttk.Entry(self.login_frame, width=30, show="*")
         self.password_entry.pack(pady=(0, 10))
         
-        btn_frame = ttk.Frame(self.login_frame)
+        btn_frame = ttk.Frame(self.login_frame, style="Button.TFrame")
         btn_frame.pack(pady=20)
         
-        self.login_btn = ttk.Button(btn_frame, text="Login", command=self.login)
+        self.login_btn = ttk.Button(btn_frame, text="👤 Login", command=self.login)
         self.login_btn.pack(side=tk.LEFT, padx=5)
         
-        self.register_btn = ttk.Button(btn_frame, text="Register", command=self.register)
+        self.register_btn = ttk.Button(btn_frame, text="🔐 Register", command=self.register)
         self.register_btn.pack(side=tk.LEFT, padx=5)
         
-        self.visitor_btn = ttk.Button(self.login_frame, text="Continue as Visitor", command=self.continue_as_visitor)
+        self.visitor_btn = ttk.Button(self.login_frame, text="🧑‍🤝‍🧑 Continue as Visitor", command=self.continue_as_visitor)
         self.visitor_btn.pack(pady=10)
     
     def setup_chat_ui(self):
@@ -170,35 +182,56 @@ class ChatApp:
         self.user_frame = ttk.Frame(self.sidebar, style='TFrame')
         self.user_frame.pack(fill=tk.X, padx=5, pady=10)
         
-        self.user_label = ttk.Label(self.user_frame, text="Visitor Mode", font=("Arial", 10, "bold"))
+        self.user_label = ttk.Label(self.user_frame, text="👤 Visitor Mode", font=("Arial", 10, "bold"))
         self.user_label.pack(side=tk.LEFT, padx=5)
-        
-        self.logout_btn = ttk.Button(self.user_frame, text="Logout", width=8, command=self.logout)
+         
+        self.logout_btn = ttk.Button(self.user_frame, text="Logout", style='Logout.TButton', command=self.logout)
         self.logout_btn.pack(side=tk.RIGHT, padx=5)
         
+        separator_profile = tk.Canvas(self.sidebar, height=2, bg="#5c5c5e", highlightthickness=0)
+        separator_profile.pack(fill=tk.X, padx=10, pady=5)
+        
         # Sidebar - Channels
-        ttk.Label(self.sidebar, text="CHANNELS", font=("Arial", 9, "bold")).pack(fill=tk.X, padx=10, pady=(10, 5), anchor=tk.W)
+        ttk.Label(self.sidebar, text="CHANNELS", font=("Arial", 10, "bold")).pack(fill=tk.X, padx=10, pady=(10, 5), anchor=tk.W)
         
         self.channels_frame = ttk.Frame(self.sidebar, style='TFrame')
         self.channels_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        self.create_channel_btn = ttk.Button(self.sidebar, text="+ Create Channel", 
+        self.create_channel_btn = ttk.Button(self.sidebar, text="➕ Create Channel", 
                                            command=self.create_channel, style='Action.TButton')
         self.create_channel_btn.pack(fill=tk.X, padx=5, pady=5)
         
-        # Add peer status frame to sidebar
-        ttk.Label(self.sidebar, text="ONLINE PEERS", font=("Arial", 9, "bold")).pack(
-            fill=tk.X, padx=10, pady=(10, 5), anchor=tk.W)
+        separator_channels = tk.Canvas(self.sidebar, height=2, bg="#5c5c5e", highlightthickness=0)
+        separator_channels.pack(fill=tk.X, padx=10, pady=(5, 5))
         
+        # Add peer status frame to sidebar
+        peer_status_frame = ttk.Frame(self.sidebar, style='TFrame')
+        peer_status_frame.pack(fill=tk.X, padx=10, pady=(10, 5))
+        
+        # Add green dot for ONLINE PEERS
+        peer_status_canvas = tk.Canvas(peer_status_frame, width=15, height=15, 
+                                bg="#2f3136", highlightthickness=0)
+        peer_status_canvas.pack(side=tk.LEFT, padx=(0, 5))
+        peer_status_indicator = peer_status_canvas.create_oval(2, 2, 13, 13, fill="#43b581")
+        
+        # Add ONLINE PEERS label
+        ttk.Label(peer_status_frame, text="ONLINE PEERS", font=("Arial", 9, "bold"), 
+            foreground="#eeeeee").pack(side=tk.LEFT, anchor=tk.W)
+        
+        # Add vertical separator between sidebar and content
+        separator_vertical = tk.Canvas(self.chat_frame, width=2, bg="#5c5c5e", highlightthickness=0)
+        separator_vertical.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 5))
+        
+        # Create peers frame to list online peers
         self.peers_frame = ttk.Frame(self.sidebar, style='TFrame')
-        self.peers_frame.pack(fill=tk.X, expand=False, padx=5, pady=5)
+        self.peers_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(5, 10))
         
         # Content area - Channel name
         self.channel_header = ttk.Frame(self.content, style='TFrame', height=50)
         self.channel_header.pack(fill=tk.X)
         self.channel_header.pack_propagate(False)
         
-        self.channel_name = ttk.Label(self.channel_header, text="# welcome", font=("Arial", 14, "bold"))
+        self.channel_name = ttk.Label(self.channel_header, text="💬 # welcome", font=("Arial", 14, "bold"))
         self.channel_name.pack(side=tk.LEFT, padx=15, pady=10)
         
         # Add host status indicator in channel header
@@ -206,7 +239,7 @@ class ChatApp:
         self.host_status_frame.pack(side=tk.RIGHT, padx=10)
         
         self.host_status_canvas = tk.Canvas(self.host_status_frame, width=12, height=12, 
-                                         bg="#36393f", highlightthickness=0)
+                                         bg="#2f3136", highlightthickness=0)
         self.host_status_canvas.pack(side=tk.LEFT, padx=2)
         self.host_indicator = self.host_status_canvas.create_oval(2, 2, 10, 10, fill="gray")
         
@@ -217,57 +250,131 @@ class ChatApp:
         self.connection_frame = ttk.Frame(self.channel_header)
         self.connection_frame.pack(side=tk.RIGHT, padx=10)
         
-        self.connection_label = ttk.Label(self.connection_frame, text="Connection: ", foreground="#ffffff")
+        self.connection_label = ttk.Label(self.connection_frame, text="🔌 Connection: ", foreground="#ffffff")
         self.connection_label.pack(side=tk.LEFT)
         
         self.connection_type = ttk.Label(self.connection_frame, text="Server", foreground="#ffffff")
         self.connection_type.pack(side=tk.LEFT, padx=5)
         
         # Add livestream buttons in channel header
-        self.stream_btn = ttk.Button(self.channel_header, text="Start Stream", 
+        self.stream_btn = ttk.Button(self.channel_header, text="🖥 Start Stream", 
                                    command=self.start_livestream)
         self.stream_btn.pack(side=tk.RIGHT, padx=10)
         
-        self.view_stream_btn = ttk.Button(self.channel_header, text="View Stream", 
+        self.view_stream_btn = ttk.Button(self.channel_header, text="👀 View Stream", 
                                         command=self.view_livestream)
         self.view_stream_btn.pack(side=tk.RIGHT, padx=10)
         
+        # Add separator below channel header
+        separator_header = tk.Canvas(self.content, height=2, bg="#5c5c5e", highlightthickness=0)
+        separator_header.pack(fill=tk.X, padx=10, pady=(0, 10))
+        
         # Content area - Messages
         self.messages_frame = ttk.Frame(self.content, style='TFrame')
-        self.messages_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        self.messages_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=10)
         
-        self.messages_canvas = tk.Canvas(self.messages_frame, bg="#36393f", highlightthickness=0)
+        # Create a canvas for messages
+        self.messages_canvas = tk.Canvas(self.messages_frame, bg="#2f3136", highlightthickness=0)
         self.messages_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
+        # Add a single scrollbar
         self.scrollbar = ttk.Scrollbar(self.messages_frame, orient=tk.VERTICAL, command=self.messages_canvas.yview)
         self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
+        # Configure canvas scrolling
         self.messages_canvas.configure(yscrollcommand=self.scrollbar.set)
+        
+        # Create a frame inside the canvas to hold the messages
         self.messages_inner = ttk.Frame(self.messages_canvas, style='TFrame')
         self.messages_window = self.messages_canvas.create_window((0, 0), window=self.messages_inner, anchor=tk.NW)
         
         # Content area - Message input
         self.message_input_frame = ttk.Frame(self.content, style='TFrame', height=80)
-        self.message_input_frame.pack(fill=tk.X, padx=10, pady=10)
+        self.message_input_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=10)
         
-        self.message_entry = tk.Text(self.message_input_frame, height=3, bg="#ffffff", fg="#000000", 
-                                     insertbackground="black", relief=tk.FLAT, font=("Arial", 10))
-        self.message_entry.pack(fill=tk.X, expand=True, side=tk.LEFT, padx=(0, 10))
+        # Create a container for the message entry
+        self.entry_container = ttk.Frame(self.message_input_frame, style='TFrame')
+        self.entry_container.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
+        
+        # Add message entry
+        self.message_entry = tk.Text(self.entry_container, height=3, bg="#444444", fg="#ffffff", 
+                                 insertbackground="#000000", relief=tk.FLAT, font=("Arial", 10), width=50)
+        self.message_entry.pack(fill=tk.BOTH, expand=True)
         self.message_entry.bind("<Return>", self.send_message_event)
         
+        # Create a container for the icon button and message entry
+        self.icon_container = ttk.Frame(self.message_input_frame, style='TFrame')
+        self.entry_container.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
+        
+        # Create a container for icon buttons
+        self.button_container = ttk.Frame(self.message_input_frame, style='TFrame')
+        self.button_container.pack(side=tk.RIGHT, fill=tk.Y, padx=5)
+        
+        # Add send button
         self.send_btn = ttk.Button(self.message_input_frame, text="Send", 
                                   command=self.send_message, style='Action.TButton')
-        self.send_btn.pack(side=tk.RIGHT, padx=5)
+        self.send_btn.pack(fill=tk.X, pady=(5, 5))
+        
+        # Add icon picker button below the send button
+        self.icon_btn = ttk.Button(self.button_container, text="😀", command=self.open_icon_picker, style='TButton')
+        self.icon_btn.pack(fill=tk.X, pady=(5, 5))  # Place below the send button
         
         # Add file upload button next to send button
         self.upload_btn = ttk.Button(self.message_input_frame, text="Upload", 
                                    command=self.upload_file, style='TButton')
-        self.upload_btn.pack(side=tk.RIGHT, padx=5)
+        self.upload_btn.pack(fill=tk.X, pady=(5, 5))
         
         # Configure canvas scrolling    
-        self.messages_inner.bind("<Configure>", self.on_frame_configure)
-        self.messages_canvas.bind("<Configure>", self.on_canvas_configure)
-        self.messages_canvas.bind_all("<MouseWheel>", self.on_mousewheel)
+        self.messages_inner.bind("<Configure>", lambda e: self.messages_canvas.configure(scrollregion=self.messages_canvas.bbox("all")))
+        self.messages_canvas.bind("<Configure>", lambda e: self.messages_canvas.itemconfig(self.messages_window, width=e.width))
+        self.messages_canvas.bind_all("<MouseWheel>", lambda e: self.messages_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"))
+        
+    def open_icon_picker(self):
+        """Open a popup window to select an icon."""
+        icon_window = tk.Toplevel(self.root)
+        icon_window.title("Select an Icon")
+        icon_window.geometry("320x200")
+        icon_window.configure(bg="#2f3136")
+
+        # List of icons (you can add more)
+        icons = ["😀", "😂", "😍", "😎", "😢", "😡", 
+                "👍", "👎", "🎉", "❤️", "🔥", "✨", 
+                "🎁", "🎶", "📚", "📷", "💻", "📱"]
+
+        def select_icon(icon):
+            """Insert the selected icon into the message entry."""
+            self.message_entry.insert(tk.END, icon)
+            icon_window.destroy()
+            
+        # Create a canvas to hold the icons
+        canvas = tk.Canvas(icon_window, bg="#2f3136", highlightthickness=0)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # Add a scrollbar
+        scrollbar = ttk.Scrollbar(icon_window, orient=tk.VERTICAL, command=canvas.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Configure canvas scrolling
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        
+        # Create a frame inside the canvas to hold the icons
+        icon_frame = ttk.Frame(canvas, style='TFrame')
+        canvas.create_window((0, 0), window=icon_frame, anchor="nw")
+        
+        # Enable mousewheel scrolling
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        icon_window.bind_all("<MouseWheel>", _on_mousewheel)
+            
+        # Calculate rows and columns dynamically
+        max_columns = 3  # Maximum number of columns per row
+        for index, icon in enumerate(icons):
+            row = index // max_columns
+            col = index % max_columns
+            btn = ttk.Button(icon_frame, text=icon, command=lambda i=icon: select_icon(i), style='TButton')
+            btn.grid(row=row, column=col, padx=5, pady=5)
     
     def on_frame_configure(self, event):
         self.messages_canvas.configure(scrollregion=self.messages_canvas.bbox("all"))
@@ -351,11 +458,13 @@ class ChatApp:
         """Update connection status UI."""
         if is_connected:
             self.status_var.set("Connected to server")
-            self.status_canvas.itemconfig(self.status_indicator, fill="green")
+            self.status_label.configure(foreground="#43b581")
+            self.status_canvas.itemconfig(self.status_indicator, fill="#43b581")
             log_connection("Connected to server")
         else:
             self.status_var.set("Disconnected from server")
-            self.status_canvas.itemconfig(self.status_indicator, fill="red")
+            self.status_label.configure(foreground="#f04747")
+            self.status_canvas.itemconfig(self.status_indicator, fill="#f04747")
             log_connection("Disconnected from server")
     
     def update_auth_status(self, success, message):
@@ -366,7 +475,7 @@ class ChatApp:
             else:
                 log_connection(f"User logged in: {self.client.username}")
                 self.show_chat_frame()
-                self.user_label.config(text=f"Logged in as: {self.client.username}")
+                self.user_label.config(text=f"Profile: {self.client.username}")
                 # Enable message entry for authenticated users
                 self.message_entry.config(state="normal")
                 self.send_btn.config(state="normal")
@@ -391,6 +500,16 @@ class ChatApp:
     
     def join_channel(self, channel_id):
         log_connection(f"Joining channel: {channel_id}")
+        
+        # Clear existing messages from the UI first
+        for widget in self.messages_inner.winfo_children():
+            widget.destroy()
+        # Reset last message count to ensure update happens
+        self.last_message_count = 0
+        # Clear temporary message cache
+        if hasattr(self.client, '_temp_messages'):
+            self.client._temp_messages = []
+
         self.client.join_channel(channel_id)
         self.channel_name.config(text=f"# {channel_id}")
         
@@ -505,18 +624,25 @@ class ChatApp:
                     # Show sender with offline indicator if needed
                     sender_text = f"{sender}{' (sent offline)' if is_offline else ''}"
                     sender_label = ttk.Label(message_frame, text=sender_text, 
-                                          foreground="#0000ff", font=("Arial", 10, "bold"))
+                                          foreground="#7289da", font=("Arial", 10, "bold"))
                     sender_label.pack(anchor=tk.W)
                     
                     time_label = ttk.Label(message_frame, text=time_str, 
-                                         foreground="#000000", font=("Arial", 8))
+                                         foreground="#b9bbbe", font=("Arial", 8))
                     time_label.pack(anchor=tk.W)
+                    
+                    # Check if the content is an icon
+                    if content in ["😀", "😂", "😍", "😎", "😢", "😡", "👍", "👎", "🎉", "❤️", "🔥", "✨", "🎁", "🎶", "📚", "📷", "💻", "📱"]:
+                    # Display icon with a larger font size and centered
+                        icon_label = ttk.Label(message_frame, text=content, 
+                                           font=("Arial", 20), foreground="#ffffff", background="#40444b")
+                        icon_label.pack(anchor=tk.W, pady=(5, 0))
                     
                     # Check content structure and log it for debugging
                     log_connection(f"Message content type: {type(content)}")
                     if isinstance(content, dict):
-                        log_connection(f"Message content keys: {content.keys()}")
-                    
+                        log_connection(f"Message content keys: {content.keys()}") 
+                        
                     # Check if content itself is a dict and has file_type (direct message format)
                     if isinstance(content, dict) and 'file_type' in content:
                         file_type = content.get('file_type')
@@ -536,7 +662,7 @@ class ChatApp:
                     # Regular text message
                     elif isinstance(content, str):
                         content_label = ttk.Label(message_frame, text=content, 
-                                              wraplength=500, foreground="#000000")
+                                              wraplength=500, foreground="#ffffff", background="#40444b")
                         content_label.pack(anchor=tk.W, pady=(2, 0))
                     
                     # Handle case where the message itself might have file data
@@ -664,7 +790,7 @@ class ChatApp:
                     img_data = img_byte_arr.read()
                     
                     # Log image details for debugging
-                    log_connection(f"Processing image: {img.format}, {img.size}, {img.mode}")
+                    #log_connection(f"Processing image: {img.format}, {img.size}, {img.mode}")
                     
                 except Exception as e:
                     log_connection(f"Error processing image: {str(e)}")
@@ -679,7 +805,7 @@ class ChatApp:
                 filename = os.path.basename(file_path)
                 
                 # Log upload attempt with more detailed info
-                log_connection(f"Uploading image: {filename} ({len(file_data)} bytes encoded)")
+                #log_connection(f"Uploading image: {filename} ({len(file_data)} bytes encoded)")
                 
                 # Send as a special message type with more explicit structure
                 message_data = {
@@ -698,8 +824,9 @@ class ChatApp:
                     log_connection(f"Image upload successful: {filename}")
                     # Force a refresh of the messages to ensure our image appears
                     self.client.get_messages(self.client.current_channel)
+                    self.root.after(0, lambda: self.update_messages(self.client._temp_messages))
                 else:
-                    log_connection(f"Image upload failed: {filename}")
+                    #log_connection(f"Image upload failed: {filename}")
                     self.root.after(0, lambda: messagebox.showerror("Error", "Failed to send image. The server may have rejected it."))
                 
                 # Re-enable the upload button
