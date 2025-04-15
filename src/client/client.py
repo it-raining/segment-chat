@@ -3,9 +3,9 @@ import json
 import threading
 import time
 import os
-from offline_storage import OfflineStorage
-from peer_manager import PeerConnectionManager  # Add this import
-from utils import log_connection  # Add missing import
+from src.client.offline_storage import OfflineStorage
+from src.p2p.peer_manager import PeerConnectionManager  # Add this import
+from src.common.utils import log_connection  # Add missing import
 
 class ChatClient:
     def __init__(self, host='localhost', port=5000):

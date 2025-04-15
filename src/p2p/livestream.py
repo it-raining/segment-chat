@@ -9,10 +9,12 @@ import numpy as np
 import base64
 import struct
 from PIL import Image, ImageTk
-from utils import log_connection
+from src.common.utils import log_connection
+import collections
+import traceback
 
 class LivestreamClient:
-    def __init__(self, username="anonymous"):
+    def __init__(self, root_window=None, username="anonymous"):
         self.username = username
         self.streaming = False
         self.viewing = False
@@ -25,6 +27,7 @@ class LivestreamClient:
         self.status_callback = None
         self.video_capture = None
         self.server_client = None  # Reference to chat client for server registration
+        self.root_window = root_window  # Store the root window
         
     def set_server_client(self, client):
         """Set the server client reference for stream registration."""
@@ -137,7 +140,7 @@ class LivestreamClient:
                     self.frame_callback(rgb_frame)
                 
                 # Sleep to maintain desired framerate (aim for ~15-20 fps)
-                time.sleep(0.05)
+                time.sleep(0.02)
         except Exception as e:
             log_connection(f"Streaming error: {str(e)}")
         finally:
@@ -165,7 +168,10 @@ class LivestreamClient:
         log_connection("Stopped livestream hosting")
         if self.status_callback:
             try:
-                self.status_callback("stopped")
+                if self.root_window:
+                    self.root_window.after(0, lambda: self.status_callback("stopped"))
+                else:
+                    log_connection("Error: Cannot schedule status_callback without root_window context.")
             except Exception as e:
                 log_connection(f"Error in status callback: {str(e)}")
 
@@ -231,7 +237,10 @@ class LivestreamClient:
                 
                 # Update UI if callback is set
                 if self.frame_callback:
-                    self.frame_callback(rgb_frame)
+                    if self.root_window:
+                        self.root_window.after(0, lambda frame=rgb_frame: self.frame_callback(frame))
+                    else:
+                        log_connection("Error: Cannot schedule frame_callback without root_window context.")
         except Exception as e:
             log_connection(f"Viewing error: {str(e)}")
         finally:
@@ -249,7 +258,10 @@ class LivestreamClient:
         log_connection("Stopped livestream viewing")
         if self.status_callback:
             try:
-                self.status_callback("stopped")
+                if self.root_window:
+                    self.root_window.after(0, lambda: self.status_callback("stopped"))
+                else:
+                    log_connection("Error: Cannot schedule status_callback without root_window context.")
             except Exception as e:
                 log_connection(f"Error in status callback: {str(e)}")
 
@@ -277,6 +289,21 @@ class LivestreamWindow:
         self.host_info = host_info
         self.status_var = tk.StringVar(value="Initializing...")
         self.setup_ui()
+        self.frame_buffer = collections.deque(maxlen=5)  # Buffer ~5 frames
+        self.display_update_ms = 50  # Target ~20fps display (1000ms / 20fps = 50ms)
+        self.update_job = None
+
+        # Ensure client has the root window reference
+        if not self.client.root_window:
+            if isinstance(parent, (tk.Tk, tk.Toplevel)):
+                self.client.root_window = parent.winfo_toplevel()
+            else:
+                log_connection("CRITICAL ERROR: LivestreamClient needs root_window reference!")
+
+        # Set callbacks *before* starting host/view
+        self.client.set_frame_callback(self.handle_frame_update)  # Use handler
+        self.client.set_status_callback(self.handle_status_update)  # Use handler
+
         if host_info:
             self.start_viewing()
         else:
@@ -296,8 +323,6 @@ class LivestreamWindow:
 
     def start_hosting(self):
         self.status_var.set("Starting stream...")
-        self.client.set_frame_callback(self.update_frame)
-        self.client.set_status_callback(self.update_status)
         threading.Thread(
             target=self._start_hosting_thread,
             daemon=True
@@ -313,8 +338,6 @@ class LivestreamWindow:
 
     def start_viewing(self):
         self.status_var.set("Connecting to stream...")
-        self.client.set_frame_callback(self.update_frame)
-        self.client.set_status_callback(self.update_status)
         threading.Thread(
             target=self._start_viewing_thread,
             daemon=True
@@ -327,30 +350,62 @@ class LivestreamWindow:
             self.window.after(0, lambda: self.status_var.set(f"Error: {result}"))
             self.window.after(0, lambda: messagebox.showerror("Viewing Error", result, parent=self.window))
 
-    def update_frame(self, frame):
-        image = Image.fromarray(frame)
-        canvas_width = self.canvas.winfo_width()
-        canvas_height = self.canvas.winfo_height()
-        if canvas_width > 1 and canvas_height > 1:
-            image = image.resize((canvas_width, canvas_height), Image.Resampling.LANCZOS)
-        self.photo = ImageTk.PhotoImage(image=image)
-        self.canvas.create_image(0, 0, image=self.photo, anchor=tk.NW)
+    def handle_frame_update(self, frame):
+        """Handles frame updates from client (called by background thread via root.after)."""
+        self.frame_buffer.append(frame)
 
-    def update_status(self, status):
-        if status == "viewing":
-            self.status_var.set("Viewing livestream")
-        elif status == "streaming":
-            self.status_var.set("Streaming live")
-        elif status == "stopped":
-            self.status_var.set("Stream ended")
+    def handle_status_update(self, status):
+        """Handles status updates from client (called by background thread via root.after)."""
+        self._update_ui_status(status)
+
+    def _update_ui_status(self, status):
+        """Update UI elements based on status (runs on main thread)."""
+        log_connection(f"Livestream status update: {status}")
+        self.status_var.set(f"Status: {status.replace('_', ' ').title()}")
+
+        if status in ["stopped", "stopped_by_host", "disconnected", "error"]:
+            if self.update_job:
+                self.window.after_cancel(self.update_job)
+                self.update_job = None
+
+            if status == "stopped_by_host":
+                messagebox.showinfo("Stream Ended", "The host has stopped the stream.", parent=self.window)
+            elif status == "disconnected":
+                messagebox.showwarning("Stream Disconnected", "Lost connection to the stream.", parent=self.window)
+            elif status == "error":
+                messagebox.showerror("Stream Error", "An error occurred during the stream.", parent=self.window)
+
             try:
-                # Check if window still exists and is valid before showing message
                 if self.window.winfo_exists():
-                    messagebox.showinfo("Stream Ended", "The livestream has ended.", parent=self.window)
-                    self.window.after(1000, self.window.destroy)
-            except Exception as e:
-                # Window might be already destroyed, just log the error
-                log_connection(f"Error updating stream status: {str(e)}")
+                    self.window.destroy()
+            except tk.TclError as e:
+                log_connection(f"Error destroying livestream window (already destroyed?): {e}")
+
+        elif status == "hosting":
+            self.stop_button.config(text="Stop Hosting", command=self.stop_hosting)
+        elif status == "viewing":
+            self.stop_button.config(text="Stop Viewing", command=self.stop_viewing)
+        else:
+            self.stop_button.config(text="Stop", command=self.stop)
+
+    def schedule_display_update(self):
+        self.update_job = self.window.after(self.display_update_ms, self.schedule_display_update)
+        self._display_next_frame()
+
+    def _display_next_frame(self):
+        """Display the next frame from the buffer."""
+        try:
+            if self.frame_buffer:
+                frame = self.frame_buffer.popleft()
+                image = Image.fromarray(frame)
+                canvas_width = self.canvas.winfo_width()
+                canvas_height = self.canvas.winfo_height()
+                if canvas_width > 1 and canvas_height > 1:
+                    image = image.resize((canvas_width, canvas_height), Image.Resampling.LANCZOS)
+                self.photo = ImageTk.PhotoImage(image=image)
+                self.canvas.create_image(0, 0, image=self.photo, anchor=tk.NW)
+        except Exception as e:
+            log_connection(f"Error displaying frame: {e}")
 
     def stop(self):
         if self.host_info:

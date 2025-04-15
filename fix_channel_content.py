@@ -2,7 +2,7 @@
 import sqlite3
 import json
 import os
-from utils import log_connection
+from src.common.utils import log_connection
 
 def fix_channel_content():
     log_connection("Starting database channel content fix")

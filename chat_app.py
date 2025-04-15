@@ -6,12 +6,14 @@ import time
 import datetime
 import os
 from PIL import Image, ImageTk
-from client import ChatClient
-from utils import log_connection
-from livestream import LivestreamClient, LivestreamWindow
+import argparse 
+from src.client.client import ChatClient
+from src.common.utils import log_connection
+from src.p2p.livestream import LivestreamClient, LivestreamWindow
+from src.p2p.peer_manager import PeerConnectionManager
 
 class ChatApp:
-    def __init__(self, root):
+    def __init__(self, root, host='localhost'):
         self.root = root
         self.root.title("SegmentChat")
         self.root.geometry("900x600")
@@ -68,7 +70,7 @@ class ChatApp:
         self.last_message_count = 0
         
         # Initialize client
-        self.client = ChatClient()
+        self.client = ChatClient(host=host)
         self.client.set_message_callback(self.update_messages)
         self.client.set_channels_callback(self.update_channels)
         self.client.set_connection_callback(self.update_connection_status)
@@ -76,13 +78,13 @@ class ChatApp:
         self.client.set_error_callback(self.show_error)
         self.client.set_online_status_callback(self.update_online_status)
         self.client.set_host_status_callback(self.update_host_status)
-        self.client.set_peer_content_callback(self.update_peer_content)
-        self.client.set_peer_status_callback(self.update_peer_status)
+        self.client.set_peer_content_callback(self.handle_peer_content) # Changed callback
+        self.client.set_peer_status_callback(self.handle_peer_status)   # Changed callback
         self.client.set_channel_users_callback(self.update_channel_users)
         
         # Initialize livestream client with server connection
-        self.livestream_client = LivestreamClient()
-        self.livestream_client.set_server_client(self.client)
+        # Pass the root window for UI updates
+        self.livestream_client = LivestreamClient(root_window=self.root)
         
         # Add callback for active streams
         self.client.set_active_streams_callback(self.update_active_streams)
@@ -864,39 +866,53 @@ class ChatApp:
             
             self.show_info_message(f"Channel host is {'online' if is_online else 'offline'}")
     
-    def update_peer_content(self, content, source):
-        """Handle content updates from peers."""
-        # Update UI with new content
-        self.update_messages(content)
-        
+    def handle_peer_content(self, channel_id, content, source):
+        """Handles content updates from peers (called by background thread)."""
+        # Schedule the UI update on the main thread
+        self.root.after(0, lambda: self._update_ui_peer_content(channel_id, content, source))
+
+    def _update_ui_peer_content(self, channel_id, content, source):
+        """Updates the UI with peer content (runs on main thread)."""
+        # Update UI with new content - Assuming update_messages is safe or handles its own scheduling
+        # If update_messages directly manipulates UI heavily, it might also need scheduling,
+        # but let's assume it's designed to handle list updates safely for now.
+        self.update_messages(content) # Check if this needs scheduling too
+
         # Update connection indicator
         source_type = source.split(':', 1)[0]
         source_name = source.split(':', 1)[1]
-        
+
         if source_type == 'host':
             self.connection_type.config(text=f"Host ({source_name})", foreground="#00ff00")
         elif source_type == 'peer':
             self.connection_type.config(text=f"Peer ({source_name})", foreground="#00ff00")
-    
-    def update_peer_status(self, channel_id, username, online, is_host=False):
-        """Handle peer status updates."""
+
+    def handle_peer_status(self, channel_id, username, online, is_host=False):
+        """Handles peer status updates (called by background thread)."""
+        # Schedule the UI update on the main thread
+        self.root.after(0, lambda: self._update_ui_peer_status(channel_id, username, online, is_host))
+
+    def _update_ui_peer_status(self, channel_id, username, online, is_host=False):
+        """Updates the UI with peer status (runs on main thread)."""
         if channel_id not in self.online_peers:
             self.online_peers[channel_id] = {}
-        
-        # Update peer status
+
+        # Update peer status (data structure update is safe)
         self.online_peers[channel_id][username] = {
             'online': online,
             'is_host': is_host
         }
-        
+
         # Update UI if this is the current channel
         if self.client.current_channel == channel_id:
-            self.update_peers_list()
-            
+            self.update_peers_list() # Assumes this UI update is safe
+
             # Show notification
             status = "online" if online else "offline"
-            role = "host" if is_host else "peer"
-            self.show_info_message(f"{username} ({role}) is now {status}")
+            role = " (host)" if is_host else ""
+            # Don't show notifications for self
+            if username != self.client.username:
+                self.show_info_message(f"{username}{role} is now {status}") # Assumes this UI update is safe
     
     def update_channel_users(self, channel_id, users, event=None, username=None):
         """Handle channel users updates and notifications."""
@@ -1147,8 +1163,15 @@ class ChatApp:
         self.root.destroy()
 
 def main():
+    # --- Add argument parsing ---
+    parser = argparse.ArgumentParser(description="SegmentChat Client")
+    parser.add_argument('--host', type=str, default='localhost',
+                        help='The IP address of the server to connect to.')
+    args = parser.parse_args()
+    # --- End argument parsing ---
+
     root = tk.Tk()
-    app = ChatApp(root)
+    app = ChatApp(root, host=args.host) # Pass host to ChatApp
     root.mainloop()
 
 if __name__ == "__main__":

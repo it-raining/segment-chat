@@ -7,242 +7,13 @@ import subprocess
 import sys
 import os
 import time
-from utils import log_connection
-
-class AdminClient:
-    def __init__(self, host='localhost', port=5000):
-        self.host = host
-        self.port = port
-        self.socket = None
-        self.connected = False
-        self.authenticated = False
-        # Add a timeout to prevent hanging
-        self.timeout = 10  # 10 seconds timeout
-        
-    def connect(self):
-        try:
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.settimeout(self.timeout)  # Set a timeout for operations
-            self.socket.connect((self.host, self.port))
-            self.connected = True
-            return True
-        except Exception as e:
-            print(f"Connection error: {str(e)}")
-            return False
-            
-    def admin_login(self, username, password):
-        if not self.connected:
-            return False, "Not connected to server"
-            
-        request = {
-            "type": "admin_login",
-            "username": username,
-            "password": password
-        }
-        
-        try:
-            # Increase timeout for more reliable operation
-            self.socket.settimeout(15.0)  # 15 seconds timeout for login
-            self.socket.send(json.dumps(request).encode('utf-8'))
-            
-            # Wait for response
-            response_data = self.socket.recv(4096).decode('utf-8')
-            response = json.loads(response_data)
-            
-            log_connection(f"Admin login response: {response}")
-            
-            if response['type'] == 'admin_login_response':
-                self.authenticated = response['success']
-                return response['success'], response['message']
-            return False, "Invalid response from server"
-        except socket.timeout:
-            log_connection("Admin login timed out")
-            return False, "Connection timed out waiting for server response"
-        except ConnectionError as e:
-            self.connected = False
-            log_connection(f"Admin login connection error: {str(e)}")
-            return False, f"Connection error: {str(e)}"
-        except Exception as e:
-            log_connection(f"Admin login error: {str(e)}")
-            return False, str(e)
-    
-    def get_users(self):
-        if not self.connected or not self.authenticated:
-            return False, "Not authenticated as admin"
-            
-        request = {"type": "get_users"}
-        try:
-            self.socket.send(json.dumps(request).encode('utf-8'))
-            self.socket.settimeout(self.timeout)
-            response = json.loads(self.socket.recv(4096).decode('utf-8'))
-            
-            if response['type'] == 'get_users_response':
-                return True, response['users']
-            return False, "Invalid response from server"
-        except socket.timeout:
-            return False, "Connection timed out waiting for server response"
-        except ConnectionError as e:
-            self.connected = False
-            return False, f"Connection error: {str(e)}"
-        except Exception as e:
-            return False, str(e)
-    
-    def create_user(self, username, password, is_admin=False):
-        if not self.connected or not self.authenticated:
-            return False, "Not authenticated as admin"
-            
-        request = {
-            "type": "admin_create_user",
-            "username": username,
-            "password": password,
-            "is_admin": is_admin
-        }
-        
-        try:
-            self.socket.send(json.dumps(request).encode('utf-8'))
-            self.socket.settimeout(self.timeout)
-            response = json.loads(self.socket.recv(4096).decode('utf-8'))
-            
-            if response['type'] == 'admin_create_user_response':
-                return response['success'], response['message']
-            return False, "Invalid response from server"
-        except socket.timeout:
-            return False, "Connection timed out waiting for server response"
-        except ConnectionError as e:
-            self.connected = False
-            return False, f"Connection error: {str(e)}"
-        except Exception as e:
-            return False, str(e)
-    
-    def delete_user(self, username):
-        if not self.connected or not self.authenticated:
-            return False, "Not authenticated as admin"
-            
-        request = {
-            "type": "admin_delete_user",
-            "username": username
-        }
-        
-        try:
-            self.socket.send(json.dumps(request).encode('utf-8'))
-            self.socket.settimeout(self.timeout)
-            response = json.loads(self.socket.recv(4096).decode('utf-8'))
-            
-            if response['type'] == 'admin_delete_user_response':
-                return response['success'], response['message']
-            return False, "Invalid response from server"
-        except socket.timeout:
-            return False, "Connection timed out waiting for server response"
-        except ConnectionError as e:
-            self.connected = False
-            return False, f"Connection error: {str(e)}"
-        except Exception as e:
-            return False, str(e)
-    
-    def get_channels(self):
-        if not self.connected or not self.authenticated:
-            return False, "Not authenticated as admin"
-            
-        request = {"type": "get_channels"}
-        try:
-            self.socket.send(json.dumps(request).encode('utf-8'))
-            self.socket.settimeout(self.timeout)
-            response = json.loads(self.socket.recv(4096).decode('utf-8'))
-            
-            if response['type'] == 'get_channels_response':
-                return True, response['channels']
-            return False, "Invalid response from server"
-        except socket.timeout:
-            return False, "Connection timed out waiting for server response"
-        except ConnectionError as e:
-            self.connected = False
-            return False, f"Connection error: {str(e)}"
-        except Exception as e:
-            return False, str(e)
-    
-    def create_channel(self, channel_id, is_public=True):
-        if not self.connected or not self.authenticated:
-            return False, "Not authenticated as admin"
-            
-        request = {
-            "type": "admin_create_channel",
-            "channel_id": channel_id,
-            "is_public": is_public
-        }
-        
-        try:
-            self.socket.send(json.dumps(request).encode('utf-8'))
-            self.socket.settimeout(self.timeout)
-            response = json.loads(self.socket.recv(4096).decode('utf-8'))
-            
-            if response['type'] == 'admin_create_channel_response':
-                return response['success'], response['message']
-            return False, "Invalid response from server"
-        except socket.timeout:
-            return False, "Connection timed out waiting for server response"
-        except ConnectionError as e:
-            self.connected = False
-            return False, f"Connection error: {str(e)}"
-        except Exception as e:
-            return False, str(e)
-    
-    def delete_channel(self, channel_id):
-        if not self.connected or not self.authenticated:
-            return False, "Not authenticated as admin"
-            
-        request = {
-            "type": "admin_delete_channel",
-            "channel_id": channel_id
-        }
-        
-        try:
-            self.socket.send(json.dumps(request).encode('utf-8'))
-            self.socket.settimeout(self.timeout)
-            response = json.loads(self.socket.recv(4096).decode('utf-8'))
-            
-            if response['type'] == 'admin_delete_channel_response':
-                return response['success'], response['message']
-            return False, "Invalid response from server"
-        except socket.timeout:
-            return False, "Connection timed out waiting for server response"
-        except ConnectionError as e:
-            self.connected = False
-            return False, f"Connection error: {str(e)}"
-        except Exception as e:
-            return False, str(e)
-    
-    def shutdown_server(self):
-        if not self.connected or not self.authenticated:
-            return False, "Not authenticated as admin"
-            
-        request = {"type": "admin_shutdown_server"}
-        try:
-            self.socket.send(json.dumps(request).encode('utf-8'))
-            self.socket.settimeout(self.timeout)
-            response = json.loads(self.socket.recv(4096).decode('utf-8'))
-            
-            if response['type'] == 'admin_shutdown_server_response':
-                return response['success'], response['message']
-            return False, "Invalid response from server"
-        except socket.timeout:
-            return False, "Connection timed out waiting for server response"
-        except ConnectionError as e:
-            self.connected = False
-            return False, f"Connection error: {str(e)}"
-        except Exception as e:
-            return False, str(e)
-    
-    def disconnect(self):
-        if self.socket:
-            try:
-                self.socket.close()
-            except:
-                pass
-        self.connected = False
-        self.authenticated = False
+import argparse
+from src.common.utils import log_connection
+from src.client.admin_client import AdminClient
 
 class AdminApp:
-    def __init__(self, root):
+    def __init__(self, root, host='localhost'):
+        self.host = host
         self.root = root
         self.root.title("SegmentChat Admin Panel")
         self.root.geometry("900x600")
@@ -258,7 +29,7 @@ class AdminApp:
                            font=('Arial', 10, 'bold'), padding=6)
         
         # Create admin client
-        self.client = AdminClient()
+        self.client = AdminClient(host=self.host)
         
         # Create main frames
         self.main_frame = ttk.Frame(root)
@@ -770,17 +541,18 @@ class AdminApp:
             pass  # Ignore errors and try to start server anyway
         
         try:
-            # Get the path to server.py
-            server_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'server.py')
-            
+            # Get the path to server.py relative to admin_app.py
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            server_path = os.path.join(base_dir, 'src', 'server', 'server.py') # Updated path
+
             # Make sure the logs directory exists
             os.makedirs('logs', exist_ok=True)
-            
+
             # Start server as a subprocess
             subprocess.Popen([sys.executable, server_path])
-            
+
             messagebox.showinfo("Server Status", "Server starting...")
-            
+
             # Wait a moment then try to connect
             self.root.after(2000, self.check_server_and_connect)
         except Exception as e:
@@ -875,8 +647,15 @@ class AdminApp:
         self.root.destroy()
 
 def main():
+    # --- Add argument parsing ---
+    parser = argparse.ArgumentParser(description="SegmentChat Admin Client")
+    parser.add_argument('--host', type=str, default='localhost',
+                        help='The IP address of the server to connect to.')
+    args = parser.parse_args()
+    # --- End argument parsing ---
+
     root = tk.Tk()
-    app = AdminApp(root)
+    app = AdminApp(root, host=args.host) # Pass host to AdminApp
     root.mainloop()
 
 if __name__ == "__main__":

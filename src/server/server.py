@@ -3,14 +3,14 @@ import threading
 import json
 import sqlite3
 import os
-from protocols import (
+from src.common.protocols import (
     create_submit_info_response, create_get_list_response,
     create_login_response, create_sync_content_response,
     create_create_channel_response, create_join_channel_response,
     create_get_channel_host_response, create_register_response,
     create_get_channels_response, create_get_messages_response
 )
-from utils import log_connection
+from src.common.utils import log_connection
 import signal
 import sys
 import time
@@ -41,7 +41,7 @@ channel_users = {}  # {channel_id: {username: client_id}}
 channel_users_lock = threading.Lock()
 
 # Database setup
-conn = sqlite3.connect('segment_chat.db', check_same_thread=False)
+conn = sqlite3.connect('data/segment_chat.db', check_same_thread=False)
 cursor = conn.cursor()
 
 # Create channels table with host information
