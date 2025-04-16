@@ -14,6 +14,8 @@ from src.common.utils import log_connection
 import signal
 import sys
 import time
+import traceback
+import struct
 import datetime
 
 HOST = '0.0.0.0'
@@ -169,13 +171,14 @@ def broadcast_host_status(channel_id, is_online):
         "is_online": is_online,
         "timestamp": time.time()
     }
-    notification_json = json.dumps(notification)
+    # notification_json = json.dumps(notification)
     
     # Send to all active clients
     with users_lock:
         for client_id, client_socket in active_sockets.items():
             try:
-                client_socket.send(notification_json.encode('utf-8'))
+                # client_socket.send(notification_json.encode('utf-8'))
+                send_framed_message(client_socket, notification)
             except:
                 # Skip failed sends, they'll be handled by connection loss detection
                 pass
@@ -223,23 +226,24 @@ def handle_host_register(client_socket, client_id, data):
         username = active_users.get(client_id, {}).get("username")
     
     if not is_authenticated:
-        response = json.dumps({
+        response_dict = {
             "type": "host_register_response",
             "success": False,
             "message": "Authentication required to be a host"
-        })
-        client_socket.send(response.encode('utf-8'))
+        }
+        # client_socket.send(json.dumps(response_dict).encode('utf-8'))
+        send_framed_message(client_socket, response_dict)
         return
     
     # Check if channel exists
     cursor.execute("SELECT id FROM channels WHERE id = ?", (channel_id,))
     if not cursor.fetchone():
-        response = json.dumps({
+        response_dict = {
             "type": "host_register_response",
             "success": False,
             "message": "Channel does not exist"
-        })
-        client_socket.send(response.encode('utf-8'))
+        }
+        send_framed_message(client_socket, response_dict)
         return
     
     # Update channel with host info
@@ -253,22 +257,27 @@ def handle_host_register(client_socket, client_id, data):
         # Notify clients of new host
         broadcast_host_status(channel_id, True)
         
-        response = json.dumps({
+        response_dict = {
             "type": "host_register_response",
             "success": True,
             "message": "Successfully registered as host",
             "channel_id": channel_id
-        })
-        client_socket.send(response.encode('utf-8'))
+        }
+        send_framed_message(client_socket, response_dict)
         
         log_connection(f"User {username} registered as host for channel {channel_id}")
     except Exception as e:
-        response = json.dumps({
+        log_connection(f"Error registering host for channel {channel_id}: {e}")
+        response_dict = {
             "type": "host_register_response",
             "success": False,
-            "message": f"Error: {str(e)}"
-        })
-        client_socket.send(response.encode('utf-8'))
+            "message": f"Error registering host: {str(e)}"
+        }
+        try:
+            # Use send_framed_message for consistency
+            send_framed_message(client_socket, response_dict)
+        except Exception as send_e:
+            log_connection(f"Failed to send host registration error response: {send_e}")
 
 def handle_get_channel_host_info(client_socket, data):
     """Handle request for channel host info."""
@@ -280,17 +289,19 @@ def handle_get_channel_host_info(client_socket, data):
     )
     result = cursor.fetchone()
     
+    response_dict = {}
     if not result:
-        response = json.dumps({
+        response_dict = {
             "type": "channel_host_info",
             "channel_id": channel_id,
             "is_online": False,
+            "message": "Channel or host information not found",
             "timestamp": time.time()
-        })
+        }
     else:
         host_ip, host_port, peer_port, last_ping = result
-        is_online = last_ping is not None and last_ping > time.time() - host_timeout
-        response = json.dumps({
+        is_online = last_ping is not None and last_ping > (time.time() - host_timeout)
+        response_dict = {
             "type": "channel_host_info",
             "channel_id": channel_id,
             "host_ip": host_ip,
@@ -298,62 +309,66 @@ def handle_get_channel_host_info(client_socket, data):
             "peer_port": peer_port,
             "is_online": is_online,
             "timestamp": time.time()
-        })
-    
-    client_socket.send(response.encode('utf-8'))
+        }
+
+    try:
+        # Use the framed message sender for consistency
+        send_framed_message(client_socket, response_dict)
+    except Exception as e:
+        log_connection(f"Failed to send channel host info for {channel_id}: {e}")
 
 def handle_join_channel(client_socket, client_id, data):
     """Handle request to join a channel with user tracking."""
     channel_id = data['channel_id']
-    
+    response_dict = None # Initialize response dictionary
+
     # Get username of the client
     with users_lock:
         username = active_users.get(client_id, {}).get("username", "visitor")
-    
-    # Check if channel exists and if it's public or user is authenticated
+
     cursor.execute("SELECT is_public FROM channels WHERE id=?", (channel_id,))
     result = cursor.fetchone()
     if not result:
-        response = create_join_channel_response(False, "Channel not found")
+        # response = create_join_channel_response(False, "Channel not found") # OLD
+        response_dict = json.loads(create_join_channel_response(False, "Channel not found")) # NEW: Parse to dict
     elif result[0] == 0:  # Private channel
         with users_lock:
             is_authenticated = active_users.get(client_id, {}).get("authenticated", False)
         if not is_authenticated:
-            response = create_join_channel_response(False, "Authentication required for private channels")
+            # response = create_join_channel_response(False, "Authentication required for private channels") # OLD
+            response_dict = json.loads(create_join_channel_response(False, "Authentication required for private channels")) # NEW: Parse to dict
         else:
-            # Add user to channel users
             with channel_users_lock:
                 if channel_id not in channel_users:
                     channel_users[channel_id] = {}
                 channel_users[channel_id][username] = client_id
-            
-            # Broadcast join notification
+
             broadcast_user_join(channel_id, username)
-            
-            # Automatically send the list of users in this channel
             handle_get_channel_users(client_socket, {"channel_id": channel_id})
-            
-            response = create_join_channel_response(True, "Joined private channel")
-    else:
-        # Add user to channel users
+
+            # response = create_join_channel_response(True, "Joined private channel") # OLD
+            response_dict = json.loads(create_join_channel_response(True, "Joined private channel")) # NEW: Parse to dict
+    else: # Public channel
         with channel_users_lock:
             if channel_id not in channel_users:
                 channel_users[channel_id] = {}
             channel_users[channel_id][username] = client_id
-        
-        # Broadcast join notification
         broadcast_user_join(channel_id, username)
-        
-        # Automatically send the list of users in this channel
         handle_get_channel_users(client_socket, {"channel_id": channel_id})
-        
-        response = create_join_channel_response(True, "Joined channel")
-    
-    # Log the channel users for debugging
+
+        # response = create_join_channel_response(True, "Joined channel") # OLD
+        response_dict = json.loads(create_join_channel_response(True, "Joined channel")) # NEW: Parse to dict
+
     with channel_users_lock:
         log_connection(f"Channel {channel_id} users: {list(channel_users.get(channel_id, {}).keys())}")
-    
-    client_socket.send(response.encode('utf-8'))
+
+    if response_dict: # Ensure we have a response to send
+        # client_socket.send(response.encode('utf-8')) # OLD LINE
+        send_framed_message(client_socket, response_dict) # NEW LINE - Send the dictionary
+    else:
+        log_connection(f"Error: No response generated for join_channel request for {channel_id}")
+
+
 
 def handle_leave_channel(client_socket, client_id, data):
     """Handle request to leave a channel."""
@@ -378,63 +393,75 @@ def handle_leave_channel(client_socket, client_id, data):
     if user_removed:
         broadcast_user_leave(channel_id, username)
     
-    response = json.dumps({
+    response_dict = {
         "type": "leave_channel_response",
         "success": True
-    })
-    client_socket.send(response.encode('utf-8'))
+    }
+    try:
+        send_framed_message(client_socket, response_dict)
+    except Exception as e:
+        log_connection(f"Failed to send leave channel response for {channel_id}: {e}")
 
 def handle_get_channel_users(client_socket, data):
     """Handle request for channel users."""
     channel_id = data['channel_id']
-    
+
     with channel_users_lock:
         users = list(channel_users.get(channel_id, {}).keys())
-    
+
     log_connection(f"Sending user list for channel {channel_id}: {users}")
-    
-    response = json.dumps({
+
+    response_dict = { # Create dictionary directly
         "type": "channel_users_response",
         "channel_id": channel_id,
         "users": users
-    })
-    client_socket.send(response.encode('utf-8'))
+    }
+    # client_socket.send(response.encode('utf-8')) # OLD LINE
+    try:
+        send_framed_message(client_socket, response_dict) # NEW LINE
+    except Exception as e:
+        log_connection(f"Failed to send user list for {channel_id}: {e}")
 
 def broadcast_user_join(channel_id, username):
     """Broadcast to all clients in a channel that a user has joined."""
-    notification = json.dumps({
+    notification_dict = { # Create dictionary directly
         "type": "user_channel_event",
         "event": "join",
         "channel_id": channel_id,
         "username": username,
         "timestamp": time.time()
-    })
-    
-    # Send to all active clients
+    }
+
     with users_lock:
-        for client_id, client_socket in active_sockets.items():
-            try:
-                client_socket.send(notification.encode('utf-8'))
-            except:
-                pass  # Skip failed sends
+        sockets_to_notify = list(active_sockets.values())
+
+    for sock in sockets_to_notify:
+        try:
+            # client_socket.send(notification.encode('utf-8')) # OLD LINE
+            send_framed_message(sock, notification_dict) # NEW LINE
+        except Exception as e:
+            log_connection(f"Failed to broadcast user join to a client: {e}")
+
 
 def broadcast_user_leave(channel_id, username):
     """Broadcast to all clients in a channel that a user has left."""
-    notification = json.dumps({
+    notification_dict = { # Create dictionary directly
         "type": "user_channel_event",
         "event": "leave",
         "channel_id": channel_id,
         "username": username,
         "timestamp": time.time()
-    })
-    
-    # Send to all active clients
+    }
+
     with users_lock:
-        for client_id, client_socket in active_sockets.items():
-            try:
-                client_socket.send(notification.encode('utf-8'))
-            except:
-                pass  # Skip failed sends
+        sockets_to_notify = list(active_sockets.values())
+
+    for sock in sockets_to_notify:
+        try:
+            # client_socket.send(notification.encode('utf-8')) # OLD LINE
+            send_framed_message(sock, notification_dict) # NEW LINE
+        except Exception as e:
+            log_connection(f"Failed to broadcast user leave to a client: {e}")
 
 def remove_user_from_channels(client_id):
     """Remove a user from all channels when they disconnect."""
@@ -472,12 +499,15 @@ def handle_register_livestream(client_socket, client_id, data):
         is_authenticated = active_users.get(client_id, {}).get("authenticated", False)
     
     if not is_authenticated:
-        response = json.dumps({
+        response_dict = {
             "type": "register_livestream_response",
             "success": False,
             "message": "Authentication required to host a livestream"
-        })
-        client_socket.send(response.encode('utf-8'))
+        }
+        try:
+            send_framed_message(client_socket, response_dict)
+        except Exception as e:
+            log_connection(f"Failed to send auth required response for livestream: {e}")
         return
     
     # Add to tracking
@@ -510,12 +540,15 @@ def handle_register_livestream(client_socket, client_id, data):
     # Notify clients in this channel
     broadcast_livestream_update(channel_id)
     
-    response = json.dumps({
+    response_dict = {
         "type": "register_livestream_response",
         "success": True,
         "message": "Livestream registered successfully"
-    })
-    client_socket.send(response.encode('utf-8'))
+    }
+    try:
+        send_framed_message(client_socket, response_dict)
+    except Exception as e:
+        log_connection(f"Failed to send livestream registration response: {e}")
 
 def handle_unregister_livestream(client_socket, client_id, data):
     """Handle request to unregister a livestream."""
@@ -543,12 +576,15 @@ def handle_unregister_livestream(client_socket, client_id, data):
     # Notify clients in this channel
     broadcast_livestream_update(channel_id)
     
-    response = json.dumps({
+    response_dict = {
         "type": "unregister_livestream_response",
         "success": True,
         "message": "Livestream unregistered successfully"
-    })
-    client_socket.send(response.encode('utf-8'))
+    }
+    try:
+        send_framed_message(client_socket, response_dict)
+    except Exception as e:
+        log_connection(f"Failed to send livestream unregistration response: {e}")
 
 def handle_get_active_streams(client_socket, data):
     """Handle request to get active streams for a channel."""
@@ -583,31 +619,39 @@ def handle_get_active_streams(client_socket, data):
         except Exception as e:
             log_connection(f"Database error fetching livestreams: {e}")
     
-    response = json.dumps({
+    response_dict = { # Create dictionary directly
         "type": "active_streams_response",
         "channel_id": channel_id,
         "streams": streams
-    })
-    client_socket.send(response.encode('utf-8'))
+    }
+    try:
+        # Use send_framed_message for consistency
+        send_framed_message(client_socket, response_dict)
+    except Exception as e:
+        log_connection(f"Failed to send active streams response for {channel_id}: {e}")
 
 def broadcast_livestream_update(channel_id):
     """Broadcast livestream updates to clients in a channel."""
     with livestreams_lock:
         streams = active_livestreams.get(channel_id, [])
     
-    notification = json.dumps({
+    # Create the notification dictionary
+    notification_dict = {
         "type": "livestream_update",
         "channel_id": channel_id,
         "streams": streams
-    })
-    
-    # Send to all active clients that might be in this channel
+    }
+
     with users_lock:
-        for client_id, client_socket in active_sockets.items():
-            try:
-                client_socket.send(notification.encode('utf-8'))
-            except:
-                pass
+        active_sockets_copy = list(active_sockets.items())
+
+    for client_id, client_socket in active_sockets_copy:
+        try:
+            # Use the framed message sender for consistency
+            send_framed_message(client_socket, notification_dict)
+        except Exception as e:
+            log_connection(f"Failed to send livestream update to client {client_id}: {e}")
+            pass
 
 def broadcast_message_update(channel_id, content):
     """Broadcast message updates to all clients in a channel."""
@@ -619,24 +663,24 @@ def broadcast_message_update(channel_id, content):
     
     if not client_ids:
         return
-    
-    # Create message update notification
-    notification = json.dumps({
+    # Create message update notification dictionary
+    notification_dict = {
         "type": "message_update",
         "channel_id": channel_id,
         "content": content,
         "timestamp": time.time()
-    })
-    
-    # Send to all clients in this channel
+    }
+
+    # Send to all clients in this channel using the framed message function
     with users_lock:
-        for client_id in client_ids:
-            if client_id in active_sockets:
-                try:
-                    active_sockets[client_id].send(notification.encode('utf-8'))
-                except:
-                    # Skip failed sends, they'll be handled by connection loss detection
-                    pass
+        sockets_to_notify = {cid: active_sockets[cid] for cid in client_ids if cid in active_sockets}
+
+    for client_id, client_socket in sockets_to_notify.items():
+        try:
+            send_framed_message(client_socket, notification_dict)
+        except Exception as e:
+            log_connection(f"Failed to broadcast message update to client {client_id}: {e}")
+            pass
     
     log_connection(f"Broadcasted message update for channel {channel_id} to {len(client_ids)} clients")
 
@@ -686,77 +730,148 @@ def handle_get_messages(client_socket, channel_id):
     except Exception as e:
         log_connection(f"Error getting messages from DB: {e}")
         response = create_get_messages_response(False, [], f"Error getting messages: {e}")
-    
+
+    # Parse the JSON string response back into a dictionary
     try:
-        client_socket.send(response.encode('utf-8'))
-    except ConnectionError as e:
+        response_dict = json.loads(response)
+    except json.JSONDecodeError as e:
+        log_connection(f"Error decoding response JSON in handle_get_messages: {e}")
+        response_dict = {
+            "type": "get_messages_response",
+            "success": False,
+            "messages": [],
+            "message": "Internal server error creating response"
+        }
+    try:
+        # client_socket.send(response.encode('utf-8')) # OLD LINE
+        send_framed_message(client_socket, response_dict) # NEW LINE
+    except (ConnectionError, BrokenPipeError, ConnectionResetError) as e: # Catch specific send errors
         log_connection(f"Failed to send messages to client: {e}")
+    except Exception as e: # Catch other potential errors during send
+        log_connection(f"Unexpected error sending messages: {e}")
 
 def handle_admin_login(client_socket, client_id, data):
     """Handle admin login request."""
+    response_dict = None # Initialize
     with users_lock:
         if active_users.get(client_id, {}).get("authenticated", False):
-            response = {
+            response_dict = { # Use response_dict
                 "type": "admin_login_response",
                 "success": False,
                 "message": "Already authenticated"
             }
-            client_socket.send(json.dumps(response).encode('utf-8'))
+            # client_socket.send(json.dumps(response_dict).encode('utf-8')) # OLD
+            send_framed_message(client_socket, response_dict) # NEW
             return
-    
+
     username = data['username']
     password = data['password']
-    
+
     cursor.execute("SELECT * FROM admin_users WHERE username=? AND password=?", (username, password))
     if cursor.fetchone():
         with users_lock:
             active_users[client_id] = {
-                "authenticated": True, 
+                "authenticated": True,
                 "username": username,
                 "is_admin": True
             }
-        response = {
+        response_dict = { # Use response_dict
             "type": "admin_login_response",
             "success": True,
             "message": "Admin login successful"
         }
     else:
-        response = {
+        response_dict = { # Use response_dict
             "type": "admin_login_response",
             "success": False,
             "message": "Invalid admin credentials"
         }
-    client_socket.send(json.dumps(response).encode('utf-8'))
+    # client_socket.send(json.dumps(response_dict).encode('utf-8')) # OLD
+    send_framed_message(client_socket, response_dict)
 
 def handle_get_users(client_socket, client_id):
     """Handle request to get all users."""
     # Verify admin authentication
     with users_lock:
-        is_admin = active_users.get(client_id, {}).get("is_admin", False)
-    
+        # Ensure client_id is treated as string if keys are strings, or int if keys are ints
+        is_admin = active_users.get(str(client_id), {}).get("is_admin", False) # Assuming client_id might be int from thread ID
+
+    response = {} # Initialize response dict
     if not is_admin:
         response = {
             "type": "get_users_response",
             "success": False,
             "message": "Admin privileges required"
         }
-        client_socket.send(json.dumps(response).encode('utf-8'))
-        return
-        
-    # Get users from database
-    cursor.execute("SELECT username FROM users")
-    regular_users = [{"username": row[0], "is_admin": False} for row in cursor.fetchall()]
+        # client_socket.send(json.dumps(response).encode('utf-8')) # OLD WAY
+        # return # Don't return here, send the response below
+    else:
+        try:
+            # Get users from database
+            cursor.execute("SELECT username FROM users")
+            regular_users = [{"username": row[0], "is_admin": False} for row in cursor.fetchall()]
     
-    cursor.execute("SELECT username FROM admin_users")
-    admin_users = [{"username": row[0], "is_admin": True} for row in cursor.fetchall()]
+            cursor.execute("SELECT username FROM admin_users")
+            admin_users = [{"username": row[0], "is_admin": True} for row in cursor.fetchall()]
     
-    # Combine and send
-    response = {
-        "type": "get_users_response",
-        "success": True,
-        "users": regular_users + admin_users
-    }
-    client_socket.send(json.dumps(response).encode('utf-8'))
+            # Combine and send
+            response = {
+                "type": "get_users_response",
+                "success": True,
+                "users": regular_users + admin_users
+            }
+            # client_socket.send(json.dumps(response).encode('utf-8')) # OLD WAY
+        except Exception as e:
+             log_connection(f"Error fetching users in handle_get_users: {e}")
+             traceback.print_exc()
+             response = {
+                 "type": "get_users_response",
+                 "success": False,
+                 "message": f"Server error fetching users: {e}"
+             }
+    
+    # Send the response (either success or error) using the correct framed method
+    try:
+        send_framed_message(client_socket, response)
+        log_connection(f"Sent '{response.get('type')}' response to client {client_id}")
+    except Exception as e:
+        log_connection(f"Failed to send get_users response to client {client_id}: {e}")
+    
+def handle_get_channels(client_socket, client_id):
+    """Handle request to get all channels."""
+    # Optional: Check if user is authenticated if needed, though admin check might be sufficient
+    # with users_lock:
+    #     is_authenticated = active_users.get(str(client_id), {}).get("authenticated", False)
+    # if not is_authenticated:
+    #     response = create_get_channels_response(False, [], "Authentication required")
+    #     send_framed_message(client_socket, json.loads(response)) # Assuming create_... returns JSON string
+    #     return
+
+    response_dict = {} # Initialize response dict
+    try:
+        cursor.execute("SELECT id, is_public FROM channels")
+        channels_data = [{"id": row[0], "is_public": bool(row[1])} for row in cursor.fetchall()]
+        response_json = create_get_channels_response(channels_data)
+        response_dict = json.loads(response_json) # Convert JSON string back to dict for send_framed_message
+
+    except Exception as e:
+        log_connection(f"Error fetching channels in handle_get_channels: {e}")
+        traceback.print_exc()
+        # Create an error dictionary directly
+        response_dict = {
+            "type": "get_channels_response",
+            "success": False,
+            "channels": [],
+            "message": f"Server error fetching channels: {e}"
+        }
+
+    # Send the response (either success or error) using the correct framed method
+    try:
+        send_framed_message(client_socket, response_dict)
+        log_connection(f"Sent '{response_dict.get('type')}' response to client {client_id}")
+    except Exception as e:
+        log_connection(f"Failed to send get_channels response to client {client_id}: {e}")
+
 
 def handle_admin_create_user(client_socket, client_id, data):
     """Handle request to create a new user by an admin."""
@@ -770,7 +885,8 @@ def handle_admin_create_user(client_socket, client_id, data):
             "success": False,
             "message": "Admin privileges required"
         }
-        client_socket.send(json.dumps(response).encode('utf-8'))
+        # client_socket.send(json.dumps(response).encode('utf-8'))
+        send_framed_message(client_socket, response) # NEW
         return
         
     username = data['username']
@@ -804,7 +920,8 @@ def handle_admin_create_user(client_socket, client_id, data):
             "message": f"Error creating user: {str(e)}"
         }
     
-    client_socket.send(json.dumps(response).encode('utf-8'))
+    # client_socket.send(json.dumps(response).encode('utf-8'))
+    send_framed_message(client_socket, response)
 
 def handle_admin_delete_user(client_socket, client_id, data):
     """Handle request to delete a user by an admin."""
@@ -818,7 +935,8 @@ def handle_admin_delete_user(client_socket, client_id, data):
             "success": False,
             "message": "Admin privileges required"
         }
-        client_socket.send(json.dumps(response).encode('utf-8'))
+        # client_socket.send(json.dumps(response).encode('utf-8'))
+        send_framed_message(client_socket, response)
         return
     
     username = data['username']
@@ -852,7 +970,8 @@ def handle_admin_delete_user(client_socket, client_id, data):
             "message": f"Error deleting user: {str(e)}"
         }
     
-    client_socket.send(json.dumps(response).encode('utf-8'))
+    # client_socket.send(json.dumps(response).encode('utf-8'))
+    send_framed_message(client_socket, response)
 
 def handle_admin_shutdown_server(client_socket, client_id):
     """Handle request to shut down the server."""
@@ -866,7 +985,8 @@ def handle_admin_shutdown_server(client_socket, client_id):
             "success": False,
             "message": "Admin privileges required"
         }
-        client_socket.send(json.dumps(response).encode('utf-8'))
+        # client_socket.send(json.dumps(response).encode('utf-8'))
+        send_framed_message(client_socket, response)
         return
     
     # Send response before shutting down
@@ -875,7 +995,8 @@ def handle_admin_shutdown_server(client_socket, client_id):
         "success": True,
         "message": "Server shutting down..."
     }
-    client_socket.send(json.dumps(response).encode('utf-8'))
+    # client_socket.send(json.dumps(response).encode('utf-8'))
+    send_framed_message(client_socket, response)
     
     # Set shutdown flag
     global shutdown_flag
@@ -897,7 +1018,8 @@ def handle_admin_create_channel(client_socket, client_id, data):
             "success": False,
             "message": "Admin privileges required"
         }
-        client_socket.send(json.dumps(response).encode('utf-8'))
+        # client_socket.send(json.dumps(response).encode('utf-8'))
+        send_framed_message(client_socket, response)
         return
     
     channel_id = data['channel_id']
@@ -927,7 +1049,8 @@ def handle_admin_create_channel(client_socket, client_id, data):
             "message": f"Error creating channel: {str(e)}"
         }
     
-    client_socket.send(json.dumps(response).encode('utf-8'))
+    # client_socket.send(json.dumps(response).encode('utf-8'))
+    send_framed_message(client_socket, response)
 
 def handle_admin_delete_channel(client_socket, client_id, data):
     """Handle request to delete a channel by an admin."""
@@ -941,7 +1064,8 @@ def handle_admin_delete_channel(client_socket, client_id, data):
             "success": False,
             "message": "Admin privileges required"
         }
-        client_socket.send(json.dumps(response).encode('utf-8'))
+        # client_socket.send(json.dumps(response).encode('utf-8'))
+        send_framed_message(client_socket, response)
         return
     
     channel_id = data['channel_id']
@@ -968,7 +1092,78 @@ def handle_admin_delete_channel(client_socket, client_id, data):
             "message": f"Error deleting channel: {str(e)}"
         }
     
-    client_socket.send(json.dumps(response).encode('utf-8'))
+    # client_socket.send(json.dumps(response).encode('utf-8'))
+    send_framed_message(client_socket, response)
+    
+def send_framed_message(sock, message_dict):
+    """Encodes, frames, and sends a message dictionary over a socket."""
+    try:
+        message_json = json.dumps(message_dict)
+        message_bytes = message_json.encode('utf-8')
+        # Prepend message length as a 4-byte unsigned integer (big-endian)
+        header = struct.pack('>I', len(message_bytes))
+        sock.sendall(header + message_bytes)
+        log_connection(f"Sent framed response '{message_dict.get('type', 'unknown')}' to client")
+    except (BrokenPipeError, ConnectionResetError) as e:
+        log_connection(f"Failed to send message (client disconnected): {e}")
+        raise  # Re-raise to allow calling function to handle cleanup
+    except Exception as e:
+        log_connection(f"Error sending framed message: {e}")
+        raise # Re-raise for handling
+
+def receive_framed_message(client_socket):
+    """Receives, unframes, and decodes a message dictionary."""
+    buffer = b""
+    header_size = 4
+    try:
+        # Receive Header
+        # Consider adding a timeout specific to this read if needed
+        while len(buffer) < header_size:
+            chunk = client_socket.recv(header_size - len(buffer))
+            if not chunk:
+                log_connection(f"Client {client_socket.getpeername()} disconnected (no header).")
+                return None # Indicate disconnection
+            buffer += chunk
+
+        msg_length = struct.unpack('>I', buffer[:header_size])[0]
+        buffer = buffer[header_size:] # Keep any potential leftover data if recv got more than header
+
+        # Receive Body
+        body_buffer = buffer # Start with any leftover data
+        while len(body_buffer) < msg_length:
+            bytes_to_read = min(4096, msg_length - len(body_buffer))
+            chunk = client_socket.recv(bytes_to_read)
+            if not chunk:
+                log_connection(f"Client {client_socket.getpeername()} disconnected (incomplete body).")
+                return None # Indicate disconnection
+            body_buffer += chunk
+
+        message_json = body_buffer[:msg_length].decode('utf-8')
+        # NOTE: Handle potential extra data if recv got more than needed
+        # buffer = body_buffer[msg_length:] # This part is tricky and depends on protocol needs
+
+        message_dict = json.loads(message_json)
+        return message_dict
+
+    except (ConnectionResetError, ConnectionAbortedError, socket.error) as e:
+        log_connection(f"Connection error receiving from {client_socket.getpeername()}: {e}")
+        return None # Indicate connection error/disconnection
+    except socket.timeout:
+        log_connection(f"Socket timeout receiving from {client_socket.getpeername()}")
+        return None # Indicate timeout, maybe handle differently
+    except (struct.error, json.JSONDecodeError) as e:
+        log_connection(f"Error decoding/unpacking message from {client_socket.getpeername()}: {e}")
+        # Send an error response back to the client
+        try:
+            error_response = {"type": "error", "message": "Invalid message format received"}
+            send_framed_message(client_socket, error_response)
+        except Exception as send_e:
+            log_connection(f"Failed to send format error response: {send_e}")
+        return None # Indicate bad message format
+    except Exception as e:
+        log_connection(f"Unexpected error receiving from {client_socket.getpeername()}: {e}")
+        traceback.print_exc()
+        return None # Indicate unexpected error
 
 def handle_client(client_socket):
     client_id = f"{threading.current_thread().ident}"
@@ -984,19 +1179,11 @@ def handle_client(client_socket):
     
     while not shutdown_flag.is_set():
         try:
-            message = client_socket.recv(4096).decode('utf-8')
-            if not message:
-                log_connection(f"Client {client_id} disconnected")
+            data = receive_framed_message(client_socket) # NEW WAY
+            if data is None:
+                # Error occurred or client disconnected, logged in receive_framed_message
                 break
-            
-            try:
-                data = json.loads(message)
-            except json.JSONDecodeError:
-                log_connection(f"Received invalid JSON from client {client_id}")
-                response = json.dumps({"type": "error", "message": "Invalid JSON"}).encode('utf-8')
-                client_socket.send(response)
-                continue
-            
+
             request_type = data.get('type', 'unknown')
             log_connection(f"Received {request_type} request from client {client_id}")
             
@@ -1009,7 +1196,8 @@ def handle_client(client_socket):
                             "success": False,
                             "message": "Authentication required"
                         }
-                        client_socket.send(json.dumps(response).encode('utf-8'))
+                        # client_socket.send(json.dumps(response).encode('utf-8'))
+                        handle_client
                         continue
             
             try:
@@ -1017,8 +1205,14 @@ def handle_client(client_socket):
                 if data['type'] == 'submit_info':
                     with peers_lock:
                         peers.append({'ip': data['ip'], 'port': data['port']})
-                    response = create_submit_info_response(True, "Registration successful")
-                    client_socket.send(response.encode('utf-8'))
+                    response_json = create_submit_info_response(True, "Registration successful")
+                    try:
+                        response_dict = json.loads(response_json) # Convert JSON string to dict
+                        send_framed_message(client_socket, response_dict)
+                    except json.JSONDecodeError as e:
+                        log_connection(f"Error decoding submit_info response JSON: {e}")
+                    except Exception as e:
+                        log_connection(f"Failed to send submit_info response: {e}")
                 
                 # Handle admin-specific message types
                 elif data['type'] == 'admin_login':
@@ -1045,31 +1239,51 @@ def handle_client(client_socket):
                 # Handle regular client message types
                 elif data['type'] == 'get_list':
                     with peers_lock:
-                        response = create_get_list_response(peers)
-                    client_socket.send(response.encode('utf-8'))
+                        response_json = create_get_list_response(peers)
+                    response_dict = json.loads(response_json)
+                    send_framed_message(client_socket, response_dict) 
                 
                 elif data['type'] == 'login':
                     username = data['username']
                     password = data['password']
                     cursor.execute("SELECT * FROM users WHERE username=? AND password=?", (username, password))
+                    response_dict = None # Initialize
                     if cursor.fetchone():
                         with users_lock:
                             active_users[client_id] = {"authenticated": True, "username": username}
-                        response = create_login_response(True, "Login successful")
+                        response_json = create_login_response(True, "Login successful")
                     else:
-                        response = create_login_response(False, "Invalid credentials")
-                    client_socket.send(response.encode('utf-8'))
+                        response_json = create_login_response(False, "Invalid credentials")
+                    
+                    try:
+                        response_dict = json.loads(response_json) # Convert JSON string to dict
+                        send_framed_message(client_socket, response_dict)
+                    except json.JSONDecodeError as e:
+                        log_connection(f"Error decoding login response JSON: {e}")
+                    except Exception as e:
+                        log_connection(f"Failed to send login response: {e}")
                 
                 elif data['type'] == 'register':
                     username = data['username']
                     password = data['password']
+                    response_json = None # Initialize
                     try:
                         cursor.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, password))
                         conn.commit()
-                        response = create_register_response(True, "Registration successful")
+                        response_json = create_register_response(True, "Registration successful")
                     except sqlite3.IntegrityError:
-                        response = create_register_response(False, "Username already exists")
-                    client_socket.send(response.encode('utf-8'))
+                        response_json = create_register_response(False, "Username already exists")
+                    except Exception as e:
+                        log_connection(f"Error during registration: {e}")
+                        response_json = create_register_response(False, f"Server error during registration: {e}")
+
+                    try:
+                        response_dict = json.loads(response_json) # Convert JSON string to dict
+                        send_framed_message(client_socket, response_dict)
+                    except json.JSONDecodeError as e:
+                        log_connection(f"Error decoding registration response JSON: {e}")
+                    except Exception as e:
+                        log_connection(f"Failed to send registration response: {e}")
                 
                 elif data['type'] == 'create_channel':
                     # Check if user is authenticated
@@ -1093,7 +1307,14 @@ def handle_client(client_socket):
                             response = create_create_channel_response(True, "Channel created")
                         except sqlite3.IntegrityError:
                             response = create_create_channel_response(False, "Channel already exists")
-                    client_socket.send(response.encode('utf-8'))
+                    
+                    try:
+                        response_dict = json.loads(response) # Convert JSON string to dict
+                        send_framed_message(client_socket, response_dict)
+                    except json.JSONDecodeError as e:
+                        log_connection(f"Error decoding create_channel response JSON: {e}")
+                    except Exception as e:
+                        log_connection(f"Failed to send create_channel response: {e}")
                 
                 elif data['type'] == 'join_channel':
                     handle_join_channel(client_socket, client_id, data)
@@ -1103,16 +1324,29 @@ def handle_client(client_socket):
                 
                 elif data['type'] == 'get_channel_users':
                     handle_get_channel_users(client_socket, data)
-                
+
                 elif data['type'] == 'get_channel_host':
                     channel_id = data['channel_id']
                     cursor.execute("SELECT host_ip, host_port FROM channels WHERE id=?", (channel_id,))
                     result = cursor.fetchone()
+                    response_dict = None # Initialize response dictionary
                     if result:
-                        response = create_get_channel_host_response(True, result[0], result[1])
+                        response_json = create_get_channel_host_response(True, result[0], result[1])
                     else:
-                        response = create_get_channel_host_response(False, message="Channel not found")
-                    client_socket.send(response.encode('utf-8'))
+                        response_json = create_get_channel_host_response(False, message="Channel not found")
+
+                    try:
+                        response_dict = json.loads(response_json)
+                        send_framed_message(client_socket, response_dict)
+                    except json.JSONDecodeError as e:
+                        log_connection(f"Error decoding get_channel_host response JSON: {e}")
+                        try:
+                            error_resp = {"type": "error", "message": "Internal server error creating response"}
+                            send_framed_message(client_socket, error_resp)
+                        except Exception as send_e:
+                             log_connection(f"Failed to send JSON decode error response: {send_e}")
+                    except Exception as e:
+                        log_connection(f"Failed to send get_channel_host response for {channel_id}: {e}")
                 
                 elif data['type'] == 'sync_content':
                     channel_id = data['channel_id']
@@ -1129,7 +1363,12 @@ def handle_client(client_socket):
                     # Enforce authentication requirement for posting messages
                     if not is_authenticated:
                         response = create_sync_content_response(False, "Authentication required to post messages")
-                        client_socket.send(response.encode('utf-8'))
+                        # client_socket.send(response.encode('utf-8'))
+                        try:
+                            response_dict = json.loads(response_json)
+                            send_framed_message(client_socket, response_dict)
+                        except Exception as e:
+                            log_connection(f"Failed to send sync_content auth error: {e}")
                         continue
                     
                     # Add sender information to the message
@@ -1140,17 +1379,22 @@ def handle_client(client_socket):
                     cursor.execute("UPDATE channels SET content=? WHERE id=?", (json.dumps(content), channel_id))
                     conn.commit()
                     response = create_sync_content_response(True, "Content synced")
-                    client_socket.send(response.encode('utf-8'))
+                    # client_socket.send(response.encode('utf-8'))
+                    try:
+                        response_dict = json.loads(response_json) # NEW: Convert to dict
+                        send_framed_message(client_socket, response_dict) # NEW: Use framed send
+                    except Exception as e:
+                        log_connection(f"Failed to send sync_content success response: {e}")
                     
                     # Broadcast message update to all clients in this channel
                     broadcast_message_update(channel_id, content)
                 
                 elif data['type'] == 'get_channels':
-                    # Return list of all channels, identifying which are public vs private
-                    cursor.execute("SELECT id, is_public FROM channels")
-                    channels = [{"id": row[0], "is_public": bool(row[1])} for row in cursor.fetchall()]
-                    response = create_get_channels_response(channels)
-                    client_socket.send(response.encode('utf-8'))
+                    # cursor.execute("SELECT id, is_public FROM channels")
+                    # channels = [{"id": row[0], "is_public": bool(row[1])} for row in cursor.fetchall()]
+                    # response = create_get_channels_response(channels)
+                    # client_socket.send(response.encode('utf-8'))
+                    handle_get_channels(client_socket, client_id)
                 
                 elif data['type'] == 'get_messages':
                     channel_id = data['channel_id']
@@ -1160,7 +1404,12 @@ def handle_client(client_socket):
                 elif data['type'] == 'logout':
                     with users_lock:
                         active_users[client_id] = {"authenticated": False, "username": None}
-                    client_socket.send(json.dumps({"type": "logout", "success": True}).encode('utf-8'))
+                    response_dict = {"type": "logout", "success": True} # NEW: Create dict directly
+                    # client_socket.send(json.dumps({"type": "logout", "success": True}).encode('utf-8')) # OLD
+                    try:
+                        send_framed_message(client_socket, response_dict) # NEW
+                    except Exception as e:
+                        log_connection(f"Failed to send logout response: {e}")
                 
                 elif data['type'] == 'host_heartbeat':
                     handle_host_heartbeat(client_socket, client_id, data)
@@ -1183,8 +1432,9 @@ def handle_client(client_socket):
             except Exception as e:
                 log_connection(f"Error processing request: {e}")
                 try:
-                    response = json.dumps({"type": "error", "message": f"Server error: {e}"}).encode('utf-8')
-                    client_socket.send(response)
+                    error_response = {"type": "error", "message": f"Server error: {str(e)}"}
+                    # client_socket.send(json.dumps(error_response).encode('utf-8')) # OLD LINE
+                    send_framed_message(client_socket, error_response) # NEW LINE
                 except ConnectionError:
                     log_connection(f"Failed to send error response to client {client_id}")
                     break

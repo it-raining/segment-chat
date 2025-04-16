@@ -7,10 +7,12 @@ import datetime
 import os
 from PIL import Image, ImageTk
 import argparse 
+import traceback
 from src.client.client import ChatClient
 from src.common.utils import log_connection
 from src.p2p.livestream import LivestreamClient, LivestreamWindow
 from src.p2p.peer_manager import PeerConnectionManager
+
 
 class ChatApp:
     def __init__(self, root, host='localhost'):
@@ -87,6 +89,7 @@ class ChatApp:
         self.livestream_client = LivestreamClient(root_window=self.root)
         
         # Add callback for active streams
+        self.livestream_client.set_server_client(self.client)
         self.client.set_active_streams_callback(self.update_active_streams)
         
         # Network status tracking
@@ -1003,70 +1006,84 @@ class ChatApp:
             messagebox.showerror("Error", "Please join a channel first")
             return
         
-        # Query for active streams in this channel
         if hasattr(self.client, 'get_active_streams'):
-            self.client.get_active_streams(self.client.current_channel)
-        
-        # Check if we have livestream information in the client
-        if hasattr(self.client, 'livestream_ports') and self.client.current_channel in self.client.livestream_ports:
-            # We have a registered livestream port
-            host_ip = "localhost"  # Assuming local testing
-            host_port = self.client.livestream_ports[self.client.current_channel]
-            
-            # Create livestream window with host info
-            LivestreamWindow(self.root, self.livestream_client, self.client.current_channel, (host_ip, host_port))
+            if not self.client.get_active_streams(self.client.current_channel):
+                 # Show error if sending the request failed immediately (e.g., not connected)
+                 self.show_error("Failed to send request for active streams.")
         else:
-            # No registered livestream, check with server
-            cursor = self.client.get_channel_host(self.client.current_channel)
-            
-            # Log debug info
-            print(f"Channel hosts data: {self.client.channel_hosts}")
-            
-            # For debugging, check peer manager host info
-            if hasattr(self.client, 'peer_manager') and hasattr(self.client.peer_manager, 'channel_hosts'):
-                peer_host_info = self.client.peer_manager.channel_hosts.get(self.client.current_channel)
-                print(f"Peer manager host info: {peer_host_info}")
-                
-                if peer_host_info and len(peer_host_info) >= 2:
-                    host_ip, host_port, is_connected = peer_host_info
-                    if is_connected:
-                        print(f"Using peer manager host: {host_ip}:{host_port}")
-                        # Create livestream window with host info
-                        LivestreamWindow(self.root, self.livestream_client, self.client.current_channel, (host_ip, host_port))
-                        return
-            
-            # Last resort - try localhost with default ports
-            messagebox.showinfo("Checking for Stream", 
-                             "Checking for active stream... Try again in a moment if there is one.")
+             self.show_error("Client does not support getting active streams.")
     
     def update_active_streams(self, channel_id, streams):
-        """Handle active streams information from server."""
+        """Handle active streams information received from the server."""
+        # Ensure this runs on the main thread if called from background
+        log_connection(f"Received streams update for channel {channel_id}: {streams}")
+
+        if channel_id != self.client.current_channel:
+             log_connection("Received stream info for a different channel, ignoring.")
+             return # Ignore if not for the current channel
+
+        if self.livestream_client and self.livestream_client.streaming:
+            is_own_stream = False
+            if streams and self.livestream_client.host_port:
+                for stream in streams:
+                    if stream.get('livestream_port') == self.livestream_client.host_port:
+                         is_own_stream = True
+                         break
+            if is_own_stream:
+                log_connection("Stream update is for own hosted stream. Ignoring for auto-view.")
+                return
+            else:
+                 log_connection("Stream update is for another host while we are hosting. Ignoring for auto-view.")
+                 return
+
         if not streams:
-            messagebox.showinfo("No Streams", "No active streams found for this channel")
+            messagebox.showinfo("No Streams", "No active streams found for this channel.", parent=self.root)
             return
         
-        print(f"Received streams information for channel {channel_id}: {streams}")
-        
-        if len(streams) == 1:
-            # Single stream - show directly
-            stream = streams[0]
-            host_ip = stream.get('host_ip', 'localhost')
-            host_port = stream.get('livestream_port', 6000)
-            
-            print(f"Opening single stream from {host_ip}:{host_port}")
-            LivestreamWindow(self.root, self.livestream_client, channel_id, (host_ip, host_port))
-        else:
-            # Multiple streams - create window that can show all of them
-            window = LivestreamWindow(self.root, self.livestream_client, channel_id)
-            
-            # Add each stream
-            for stream in streams:
-                host_ip = stream.get('host_ip', 'localhost')
-                host_port = stream.get('livestream_port', 6000)
+        # Now, launch the window based on the received streams
+        try:
+            if len(streams) == 1:
+                # Single stream - show directly
+                stream = streams[0]
+                host_ip = stream.get('host_ip', 'localhost') # Use localhost as fallback? Or show error?
+                host_port = stream.get('livestream_port')
                 username = stream.get('username', 'Unknown')
+                if not host_port:
+                     messagebox.showerror("Stream Error", f"Stream data from {username} is missing port information.", parent=self.root)
+                     return
                 
-                print(f"Adding stream from {username} at {host_ip}:{host_port}")
-                window.add_stream_view(username, host_ip, host_port)
+                log_connection(f"Opening single stream from {username} at {host_ip}:{host_port}")
+                LivestreamWindow(self.root, self.livestream_client, channel_id, (host_ip, host_port))
+            else:
+                # Multiple streams - create window that can show all of them
+                # NOTE: The current LivestreamWindow might not fully support multiple simultaneous views easily.
+                # This part might need significant rework in LivestreamWindow itself.
+                # For now, let's just open the first one as an example.
+                messagebox.showinfo("Multiple Streams", "Multiple streams found. Displaying the first one.", parent=self.root)
+                stream = streams[0]
+                host_ip = stream.get('host_ip', 'localhost')
+                host_port = stream.get('livestream_port')
+                username = stream.get('username', 'Unknown')
+                if not host_port:
+                     messagebox.showerror("Stream Error", f"Stream data from {username} is missing port information.", parent=self.root)
+                     return
+
+                log_connection(f"Opening first stream from {username} at {host_ip}:{host_port}")
+                LivestreamWindow(self.root, self.livestream_client, channel_id, (host_ip, host_port))
+
+                # Proper multi-stream handling would require changes in LivestreamWindow:
+                # window = LivestreamWindow(self.root, self.livestream_client, channel_id) # Create empty window
+                # for stream in streams:
+                #     host_ip = stream.get('host_ip', 'localhost')
+                #     host_port = stream.get('livestream_port')
+                #     username = stream.get('username', 'Unknown')
+                #     if host_port:
+                #         log_connection(f"Adding stream view for {username} at {host_ip}:{host_port}")
+                #         window.add_stream_view(username, host_ip, host_port) # This method needs robust implementation
+        except Exception as e:
+             log_connection(f"Error launching livestream window: {e}")
+             traceback.print_exc()
+             self.show_error(f"Failed to display livestream: {e}")
     
     def show_info_message(self, message):
         """Show system message in the chat."""

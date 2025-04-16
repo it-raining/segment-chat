@@ -541,17 +541,17 @@ class AdminApp:
             pass  # Ignore errors and try to start server anyway
         
         try:
-            # Get the path to server.py relative to admin_app.py
             base_dir = os.path.dirname(os.path.abspath(__file__))
-            server_path = os.path.join(base_dir, 'src', 'server', 'server.py') # Updated path
+            server_script_path = os.path.join(base_dir, 'src', 'server', 'server.py') # Use absolute path for clarity
 
-            # Make sure the logs directory exists
             os.makedirs('logs', exist_ok=True)
-
-            # Start server as a subprocess
-            subprocess.Popen([sys.executable, server_path])
+            env = os.environ.copy()
+            python_path = env.get('PYTHONPATH', '')
+            env['PYTHONPATH'] = f"{base_dir}{os.pathsep}{python_path}"
+            subprocess.Popen([sys.executable, server_script_path], env=env) # Pass the modified environment
 
             messagebox.showinfo("Server Status", "Server starting...")
+
 
             # Wait a moment then try to connect
             self.root.after(2000, self.check_server_and_connect)

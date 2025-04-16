@@ -58,8 +58,12 @@ class LivestreamClient:
             
             # Register stream with server if server client is available
             if self.server_client and self.server_client.connected:
+                log_connection(f"Attempting to register livestream for channel {channel_id} on port {self.host_port} with server.")
                 self.server_client.register_livestream(channel_id, self.host_port)
-            
+                log_connection(f"Livestream registration initiated for channel {channel_id}.")
+            else:
+                log_connection(f"Server client not available or not connected. Skipping livestream registration for channel {channel_id}.")
+
             # Start thread to handle streaming
             self.stream_thread = threading.Thread(
                 target=self._stream_video,
@@ -67,6 +71,7 @@ class LivestreamClient:
             )
             self.stream_thread.daemon = True
             self.stream_thread.start()
+            log_connection(f"Video streaming thread started for channel {channel_id}.")
             
             return True, self.host_port
         except Exception as e:
@@ -99,8 +104,10 @@ class LivestreamClient:
         try:
             while self.streaming:
                 ret, frame = self.video_capture.read()
-                if not ret:
-                    break
+                # if ret:
+                #     log_connection(f"[{channel_id}] Host: Successfully read frame.")
+                # else:
+                #     log_connection(f"[{channel_id}] Host: Failed to read frame! ret={ret}")
                 
                 # Resize and compress frame
                 frame = cv2.resize(frame, (640, 480))
@@ -118,14 +125,19 @@ class LivestreamClient:
                 }
                 frame_json = json.dumps(frame_data)
                 
-                # Send to all connected clients
+                # debugging purpose
+                # num_clients = len(client_sockets)
+                # if num_clients > 0:
+                    # log_connection(f"Sending frame to {num_clients} viewers.")
+                
                 for client_socket in client_sockets[:]:
                     try:
                         # Send frame length followed by the frame data
                         msg_length = len(frame_json)
                         client_socket.sendall(struct.pack(">I", msg_length))
                         client_socket.sendall(frame_json.encode('utf-8'))
-                    except:
+                    except Exception as send_err:
+                        log_connection(f"Error sending frame to a client: {send_err}. Removing client.")
                         # Remove failed socket
                         try:
                             client_socket.close()
@@ -135,12 +147,16 @@ class LivestreamClient:
                 
                 # Update our own UI if callback is set
                 if self.frame_callback:
+                    # log_connection("Updating local host UI with frame.") # Optional: Can be verbose
                     # Convert to format suitable for tkinter
                     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    self.frame_callback(rgb_frame)
+                    if self.root_window:
+                        self.root_window.after(0, lambda frame=rgb_frame: self.frame_callback(frame))
+                    else:
+                        log_connection("Error: Cannot schedule frame_callback without root_window context in _stream_video.")
                 
                 # Sleep to maintain desired framerate (aim for ~15-20 fps)
-                time.sleep(0.02)
+                time.sleep(0.05)
         except Exception as e:
             log_connection(f"Streaming error: {str(e)}")
         finally:
@@ -179,7 +195,7 @@ class LivestreamClient:
         """Start viewing a livestream from the given host."""
         if self.viewing:
             return False, "Already viewing a stream"
-        
+        log_connection(f"Attempting to connect to {host_ip}:{host_port}")
         try:
             self.view_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.view_socket.settimeout(5.0)  # 5 seconds timeout
@@ -187,6 +203,7 @@ class LivestreamClient:
             self.viewing = True
             
             # Start thread to receive video
+            log_connection("Starting receive thread...")
             self.view_thread = threading.Thread(
                 target=self._receive_video,
             )
@@ -196,8 +213,13 @@ class LivestreamClient:
             log_connection(f"Connected to livestream at {host_ip}:{host_port}")
             if self.status_callback:
                 self.status_callback("viewing")
+            log_connection("Status callback 'viewing' called.")
+
             return True, "Connected to stream"
         except Exception as e:
+            # Debugging proposals
+            log_connection(f"Error during start_viewing: {e}")
+            traceback.print_exc()
             self.stop_viewing()
             return False, str(e)
 
@@ -332,6 +354,7 @@ class LivestreamWindow:
         success, result = self.client.start_hosting(self.channel_id)
         if success:
             self.window.after(0, lambda: self.status_var.set(f"Streaming on port {result}"))
+            self.window.after(0, self.schedule_display_update) # Start display loop
         else:
             self.window.after(0, lambda: self.status_var.set(f"Error: {result}"))
             self.window.after(0, lambda: messagebox.showerror("Streaming Error", result, parent=self.window))
@@ -342,13 +365,20 @@ class LivestreamWindow:
             target=self._start_viewing_thread,
             daemon=True
         ).start()
-
     def _start_viewing_thread(self):
         host_ip, host_port = self.host_info
         success, result = self.client.start_viewing(host_ip, host_port)
-        if not success:
-            self.window.after(0, lambda: self.status_var.set(f"Error: {result}"))
-            self.window.after(0, lambda: messagebox.showerror("Viewing Error", result, parent=self.window))
+        if success:
+            self.window.after(0, self.schedule_display_update) # Start display loop
+        else:
+            if self.window.winfo_exists():
+                self.window.after(0, lambda: self.status_var.set(f"Error: {result}"))
+                if self.window.winfo_exists():
+                     self.window.after(0, lambda: messagebox.showerror("Viewing Error", result, parent=self.window))
+                else:
+                     log_connection("Viewing error occurred, but window was already destroyed.")
+            else:
+                 log_connection("Viewing error occurred, but window was already destroyed.")
 
     def handle_frame_update(self, frame):
         """Handles frame updates from client (called by background thread via root.after)."""
@@ -382,9 +412,9 @@ class LivestreamWindow:
                 log_connection(f"Error destroying livestream window (already destroyed?): {e}")
 
         elif status == "hosting":
-            self.stop_button.config(text="Stop Hosting", command=self.stop_hosting)
+            self.stop_button.config(text="Stop Hosting", command=self.client.stop_hosting)
         elif status == "viewing":
-            self.stop_button.config(text="Stop Viewing", command=self.stop_viewing)
+            self.stop_button.config(text="Stop Viewing", command=self.client.stop_viewing)
         else:
             self.stop_button.config(text="Stop", command=self.stop)
 
