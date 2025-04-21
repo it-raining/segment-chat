@@ -25,6 +25,8 @@ active_users = {}  # Track active users and their authentication status
 peers_lock = threading.Lock()
 users_lock = threading.Lock()
 
+online_users = {} # Track online users
+
 server_socket = None  # Global reference to the server socket
 shutdown_flag = threading.Event()
 
@@ -43,7 +45,7 @@ channel_users = {}  # {channel_id: {username: client_id}}
 channel_users_lock = threading.Lock()
 
 # Database setup
-conn = sqlite3.connect('data/segment_chat.db', check_same_thread=False)
+conn = sqlite3.connect('segment_chat.db', check_same_thread=False)
 cursor = conn.cursor()
 
 # Create channels table with host information
@@ -1246,14 +1248,20 @@ def handle_client(client_socket):
                 elif data['type'] == 'login':
                     username = data['username']
                     password = data['password']
-                    cursor.execute("SELECT * FROM users WHERE username=? AND password=?", (username, password))
+                    # cursor.execute("SELECT * FROM users WHERE username=? AND password=?", (username, password))
                     response_dict = None # Initialize
-                    if cursor.fetchone():
-                        with users_lock:
-                            active_users[client_id] = {"authenticated": True, "username": username}
-                        response_json = create_login_response(True, "Login successful")
-                    else:
-                        response_json = create_login_response(False, "Invalid credentials")
+                    with users_lock:
+                        # Kiểm tra nếu username đã online
+                        if username in online_users:
+                            response_json = create_login_response(False, "This account is in use")
+                        else:
+                            cursor.execute("SELECT * FROM users WHERE username=? AND password=?", (username, password))
+                            if cursor.fetchone():
+                                active_users[client_id] = {"authenticated": True, "username": username}
+                                online_users[username] = client_id  # Đánh dấu user này đang online
+                                response_json = create_login_response(True, "Login successful")
+                            else:
+                                response_json = create_login_response(False, "Invalid credentials")
                     
                     try:
                         response_dict = json.loads(response_json) # Convert JSON string to dict
@@ -1403,11 +1411,13 @@ def handle_client(client_socket):
                 
                 elif data['type'] == 'logout':
                     with users_lock:
+                        username = active_users.get(client_id, {}).get("username")
+                        if username and username in online_users and online_users[username] == client_id:
+                            del online_users[username]
                         active_users[client_id] = {"authenticated": False, "username": None}
-                    response_dict = {"type": "logout", "success": True} # NEW: Create dict directly
-                    # client_socket.send(json.dumps({"type": "logout", "success": True}).encode('utf-8')) # OLD
+                    response_dict = {"type": "logout", "success": True}
                     try:
-                        send_framed_message(client_socket, response_dict) # NEW
+                        send_framed_message(client_socket, response_dict)
                     except Exception as e:
                         log_connection(f"Failed to send logout response: {e}")
                 
@@ -1461,6 +1471,9 @@ def handle_client(client_socket):
     remove_user_from_channels(client_id)
     
     with users_lock:
+        username = active_users.get(client_id, {}).get("username")
+        if username and username in online_users and online_users[username] == client_id:
+            del online_users[username]
         if client_id in active_users:
             del active_users[client_id]
         if client_id in active_sockets:

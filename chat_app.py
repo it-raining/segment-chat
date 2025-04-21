@@ -12,7 +12,7 @@ from src.client.client import ChatClient
 from src.common.utils import log_connection
 from src.p2p.livestream import LivestreamClient, LivestreamWindow
 from src.p2p.peer_manager import PeerConnectionManager
-
+import uuid
 
 class ChatApp:
     def __init__(self, root, host='localhost'):
@@ -70,6 +70,8 @@ class ChatApp:
         self.update_interval = 1000  # Update every 1 second (1000ms)
         self.update_job = None
         self.last_message_count = 0
+        
+        self.visitor_username = None  # Thêm biến lưu visitor username
         
         # Initialize client
         self.client = ChatClient(host=host)
@@ -187,11 +189,11 @@ class ChatApp:
         self.user_frame = ttk.Frame(self.sidebar, style='TFrame')
         self.user_frame.pack(fill=tk.X, padx=5, pady=10)
         
-        self.user_label = ttk.Label(self.user_frame, text="👤 Visitor Mode", font=("Arial", 10, "bold"))
-        self.user_label.pack(side=tk.LEFT, padx=5)
+        self.user_label = ttk.Label(self.user_frame, text="👤 Visitor Mode", font=("Arial", 10, "bold"), anchor="w", wraplength=180)
+        self.user_label.pack(side=tk.TOP, fill=tk.X, padx=5, pady=(0, 5))
          
         self.logout_btn = ttk.Button(self.user_frame, text="Logout", style='Logout.TButton', command=self.logout)
-        self.logout_btn.pack(side=tk.RIGHT, padx=5)
+        self.logout_btn.pack(side=tk.TOP, anchor=tk.W, padx=5, pady=(0, 5))
         
         separator_profile = tk.Canvas(self.sidebar, height=2, bg="#5c5c5e", highlightthickness=0)
         separator_profile.pack(fill=tk.X, padx=10, pady=5)
@@ -445,13 +447,19 @@ class ChatApp:
     
     def continue_as_visitor(self):
         log_connection("User continuing as visitor")
+        # Sinh username dạng anonymous_{UUID}
+        self.visitor_username = f"anonymous_{uuid.uuid4().hex[:8]}"
+        self.client.username = self.visitor_username  # Gán cho client
+        self.client.authenticated = False  # Đảm bảo không phải user đăng nhập
         self.show_chat_frame()
-        self.user_label.config(text="Visitor Mode")
+        self.user_label.config(text=f"Visitor: {self.visitor_username}")
         # Disable message entry for visitors
         self.message_entry.config(state="disabled")
         self.send_btn.config(state="disabled")
         # Clear message entry
         self.message_entry.delete("1.0", tk.END)
+        # Optionally: thông báo cho user biết tên visitor
+        messagebox.showinfo("Visitor Mode", f"You are using the name: {self.visitor_username}")
     
     def logout(self):
         log_connection("User logging out")
@@ -1117,10 +1125,12 @@ class ChatApp:
             return
         
         # Prevent visitors from sending messages
-        if not self.client.authenticated:
-            messagebox.showerror("Error", "You must be logged in to send messages")
+        if not self.client.authenticated or (
+            self.client.username and self.client.username.startswith("anonymous_")
+        ):
+            messagebox.showerror("Error", "Visitors are not allowed to send messages")
             return
-        
+
         content = self.message_entry.get("1.0", tk.END).strip()
         if not content:
             return
