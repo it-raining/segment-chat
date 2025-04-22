@@ -36,6 +36,9 @@ class ChatClient:
         self.offline_storage = None
         self.pending_sync = False
         
+        # invisible mode
+        self.set_invisible(True) 
+        
         # Channel hosting
         self.hosted_channels = {}  # Channels this client is hosting
         self.channel_hosts = {}    # Known hosts for channels
@@ -48,6 +51,7 @@ class ChatClient:
         self.peer_manager = PeerConnectionManager()
         self.peer_manager.set_content_callback(self.handle_peer_content)
         self.peer_manager.set_peer_status_callback(self.handle_peer_status)
+        self.invisible_status_callback = None  # Callback for invisible status
         self.peer_listener_port = None
         
         # Track current role - host or regular user
@@ -109,7 +113,18 @@ class ChatClient:
             # Schedule reconnection attempt
             self._schedule_reconnect()
             return False
+        
+    def set_invisible_status_callback(self, callback):
+        """Set callback for invisible status updates: callback(success, invisible)"""
+        self.invisible_status_callback = callback
 
+    def set_invisible(self, invisible=True):
+        request = {
+            "type": "set_invisible",
+            "invisible": invisible
+        }
+        self._send_request(request)
+    
     def handle_peer_content(self, channel_id, content, source):
         """Handle content updates from peers."""
         # Update local storage
@@ -484,11 +499,25 @@ class ChatClient:
             if self.offline_storage:
                  self.offline_storage.cache_channel_content(message_data.get('channel_id'), message_data.get('content', []))
         elif msg_type == 'channel_users_response':
-             if self.channel_users_callback:
-                  self.channel_users_callback(message_data['channel_id'], message_data['users'])
-        elif msg_type == 'user_channel_event': # Handle join/leave broadcasts
-             if self.channel_users_callback:
-                  self.channel_users_callback(message_data['channel_id'], [], event=message_data['event'], username=message_data['username'])
+            channel_id = message_data['channel_id']
+            users = message_data['users']
+            # Cập nhật danh sách user cho channel
+            self.channel_users[channel_id] = users
+            if self.channel_users_callback:
+                  self.channel_users_callback(channel_id, users)
+        elif msg_type == 'user_channel_event':  # Handle join/leave broadcasts
+            channel_id = message_data['channel_id']
+            event = message_data['event']
+            username = message_data['username']
+            # Nếu server gửi kèm danh sách users mới, hãy cập nhật:
+            users = message_data.get('users')
+            if users is not None:
+                self.channel_users[channel_id] = users
+            if self.channel_users_callback:
+                self.channel_users_callback(channel_id, self.channel_users.get(channel_id, []), event=event, username=username)
+        elif msg_type == 'set_invisible_response':
+            if hasattr(self, 'invisible_status_callback') and self.invisible_status_callback:
+                self.invisible_status_callback(message_data.get('success', False), message_data.get('invisible', False))
         elif msg_type == 'channel_host_info':
              # Handle host info update (for P2P)
              self.peer_manager.update_host_status(
@@ -651,6 +680,19 @@ class ChatClient:
             if self.error_callback:
                 self.error_callback("Not connected to server")
             return False
+        
+        # Nếu đang ở channel khác, gửi leave trước
+        if self.current_channel and self.current_channel != channel_id:
+            leave_request = {
+                "type": "leave_channel",
+                "channel_id": self.current_channel
+            }
+            self._send_request(leave_request)
+            # Xóa user list channel cũ ở client
+            if self.current_channel in self.channel_users:
+                del self.channel_users[self.current_channel]
+            if self.channel_users_callback:
+                self.channel_users_callback(self.current_channel, [])
 
         # Update current channel
         self.current_channel = channel_id
@@ -975,3 +1017,4 @@ class ChatClient:
         
         if self.connection_callback:
             self.connection_callback(False)
+            

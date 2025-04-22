@@ -26,6 +26,7 @@ peers_lock = threading.Lock()
 users_lock = threading.Lock()
 
 online_users = {} # Track online users
+invisible_users = set()  # Set of usernames in invisible mode
 
 server_socket = None  # Global reference to the server socket
 shutdown_flag = threading.Event()
@@ -410,6 +411,19 @@ def handle_get_channel_users(client_socket, data):
 
     with channel_users_lock:
         users = list(channel_users.get(channel_id, {}).keys())
+        
+    # Lấy username của client đang yêu cầu
+    with users_lock:
+        client_username = None
+        for cid, info in active_users.items():
+            if active_sockets.get(cid) == client_socket:
+                client_username = info.get("username")
+                break
+    # Ẩn invisible users với người khác
+    visible_users = []
+    for u in users:
+        if u == client_username or u not in invisible_users:
+            visible_users.append(u)
 
     log_connection(f"Sending user list for channel {channel_id}: {users}")
 
@@ -426,6 +440,7 @@ def handle_get_channel_users(client_socket, data):
 
 def broadcast_user_join(channel_id, username):
     """Broadcast to all clients in a channel that a user has joined."""
+    broadcast_user_channel_event(channel_id, "join", username)
     notification_dict = { # Create dictionary directly
         "type": "user_channel_event",
         "event": "join",
@@ -447,6 +462,7 @@ def broadcast_user_join(channel_id, username):
 
 def broadcast_user_leave(channel_id, username):
     """Broadcast to all clients in a channel that a user has left."""
+    broadcast_user_channel_event(channel_id, "leave", username)
     notification_dict = { # Create dictionary directly
         "type": "user_channel_event",
         "event": "leave",
@@ -464,6 +480,30 @@ def broadcast_user_leave(channel_id, username):
             send_framed_message(sock, notification_dict) # NEW LINE
         except Exception as e:
             log_connection(f"Failed to broadcast user leave to a client: {e}")
+            
+def broadcast_user_channel_event(channel_id, event, username):
+    with channel_users_lock:
+        users = list(channel_users.get(channel_id, {}).keys())
+    # Lọc invisible users
+    with users_lock:
+        visible_users = [u for u in users if u not in invisible_users]
+    message = {
+        "type": "user_channel_event",
+        "channel_id": channel_id,
+        "event": event,
+        "username": username,
+        "users": visible_users
+    }
+    with channel_users_lock:
+        client_ids = list(channel_users.get(channel_id, {}).values())
+    with users_lock:
+        for client_id in client_ids:
+            client_socket = active_sockets.get(client_id)
+            if client_socket:
+                try:
+                    send_framed_message(client_socket, message)
+                except Exception as e:
+                    log_connection(f"Failed to broadcast user_channel_event to client {client_id}: {e}")
 
 def remove_user_from_channels(client_id):
     """Remove a user from all channels when they disconnect."""
@@ -1438,6 +1478,19 @@ def handle_client(client_socket):
                     
                 elif data['type'] == 'get_active_streams':
                     handle_get_active_streams(client_socket, data)
+                    
+                elif data['type'] == 'set_invisible':
+                    with users_lock:
+                        username = active_users.get(client_id, {}).get("username")
+                        if not username:
+                            response = {"type": "set_invisible_response", "success": False, "message": "Not authenticated"}
+                        else:
+                            if data.get("invisible", False):
+                                invisible_users.add(username)
+                            else:
+                                invisible_users.discard(username)
+                            response = {"type": "set_invisible_response", "success": True, "invisible": True/False}
+                    send_framed_message(client_socket, response)
             
             except Exception as e:
                 log_connection(f"Error processing request: {e}")

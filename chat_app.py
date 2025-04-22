@@ -81,6 +81,7 @@ class ChatApp:
         self.client.set_auth_callback(self.update_auth_status)
         self.client.set_error_callback(self.show_error)
         self.client.set_online_status_callback(self.update_online_status)
+        self.client.set_invisible_status_callback(self.handle_set_invisible_response)
         self.client.set_host_status_callback(self.update_host_status)
         self.client.set_peer_content_callback(self.handle_peer_content) # Changed callback
         self.client.set_peer_status_callback(self.handle_peer_status)   # Changed callback
@@ -188,6 +189,18 @@ class ChatApp:
         # Sidebar - User info
         self.user_frame = ttk.Frame(self.sidebar, style='TFrame')
         self.user_frame.pack(fill=tk.X, padx=5, pady=10)
+        
+        # Thêm label trạng thái online/invisible
+        self.profile_status_var = tk.StringVar(value="Online")
+        self.profile_status_label = ttk.Label(self.user_frame, textvariable=self.profile_status_var, font=("Arial", 9, "italic"))
+        self.profile_status_label.pack(side=tk.TOP, anchor=tk.W, padx=5, pady=(0, 2))
+
+        # Thêm nút chuyển chế độ
+        self.invisible_btn = ttk.Button(
+            self.user_frame, text="Go Invisible", style='TButton',
+            command=self.toggle_invisible_mode
+        )
+        self.invisible_btn.pack(side=tk.TOP, anchor=tk.W, padx=5, pady=(0, 5))
         
         self.user_label = ttk.Label(self.user_frame, text="👤 Visitor Mode", font=("Arial", 10, "bold"), anchor="w", wraplength=180)
         self.user_label.pack(side=tk.TOP, fill=tk.X, padx=5, pady=(0, 5))
@@ -466,6 +479,14 @@ class ChatApp:
         self.stop_message_polling()
         self.client.logout()
         self.show_login_frame()
+        
+    def toggle_invisible_mode(self):
+        if self.profile_status_var.get() == "Invisible":
+            self.client.set_invisible(False)
+            # UI sẽ cập nhật khi nhận response từ server
+        else:
+            self.client.set_invisible(True)
+            # UI sẽ cập nhật khi nhận response từ server
     
     def update_connection_status(self, is_connected):
         """Update connection status UI."""
@@ -512,6 +533,17 @@ class ChatApp:
                             style='Channel.TButton',
                             command=lambda cid=channel_id: self.join_channel(cid))
             btn.pack(fill=tk.X, pady=2)
+            
+    def handle_set_invisible_response(self, success, invisible):
+        if success:
+            if invisible:
+                self.profile_status_var.set("Invisible")
+                self.invisible_btn.config(text="Go Online")
+            else:
+                self.profile_status_var.set("Online")
+                self.invisible_btn.config(text="Go Invisible")
+        else:
+            messagebox.showerror("Error", "Failed to change invisible mode")
     
     def join_channel(self, channel_id):
         log_connection(f"Joining channel: {channel_id}")
