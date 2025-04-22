@@ -552,8 +552,6 @@ class AdminApp:
 
             messagebox.showinfo("Server Status", "Server starting...")
 
-
-            # Wait a moment then try to connect
             self.root.after(2000, self.check_server_and_connect)
         except Exception as e:
             messagebox.showerror("Error", f"Failed to start server: {str(e)}")
@@ -582,8 +580,6 @@ class AdminApp:
                     messagebox.showinfo("Server Started", 
                                      "Server started but connection could not be established yet. Try again in a moment.")
             else:
-                # Server still starting, try again
-                # Check if we've been trying for too long
                 if not hasattr(self, '_reconnect_count'):
                     self._reconnect_count = 1
                 else:
@@ -618,7 +614,6 @@ class AdminApp:
                 return
         
         if force:
-            # Force kill the server process
             try:
                 # Find the process listening on port 5000
                 if sys.platform == 'win32':

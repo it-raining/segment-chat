@@ -6,9 +6,11 @@ import threading
 # --- Files to disable logging for ---
 DISABLED_LOG_FILES = {
     # 'chat_app.py',
-    #   'client.py',
-    #     'admin_client.py',
-          'server.py'}
+      'client.py',
+        'admin_client.py',
+          'admin_app.py',
+              'server.py'
+          }
 
 # --- Define Log Directory and File ---
 LOG_DIR = "logs"

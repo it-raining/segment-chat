@@ -432,7 +432,6 @@ class ChatClient:
         # Call _handle_connection_loss instead of directly calling callback
         if not self.connected: # Check if it wasn't an intentional disconnect
              self._handle_connection_loss()
-    # ^^^ End of _receive_messages method ^^^
 
     # *** Add a message handler method if you don't have one ***
     def handle_server_message(self, message_data):

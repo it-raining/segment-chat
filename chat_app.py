@@ -414,9 +414,9 @@ class ChatApp:
         log_connection(f"User attempting login: {username}")
         self.client.login(username, password)
         
-        # Initialize offline storage after login
-        if self.client.authenticated:
-            self.client.initialize_offline_storage()
+        # # Initialize offline storage after login
+        # if self.client.authenticated:
+        #     self.client.initialize_offline_storage()
 
     def admin_login(self):
         """Login as an admin and access the chat application."""
@@ -430,9 +430,9 @@ class ChatApp:
         log_connection(f"Admin attempting login: {username}")
         self.client.admin_login(username, password)
         
-        # Initialize offline storage after login
-        if self.client.authenticated:
-            self.client.initialize_offline_storage()
+        # # Initialize offline storage after login
+        # if self.client.authenticated:
+        #     self.client.initialize_offline_storage()
     
     def register(self):
         username = self.username_entry.get().strip()
@@ -482,6 +482,8 @@ class ChatApp:
     
     def update_auth_status(self, success, message):
         if success:
+            # Initialize offline storage after login
+            self.client.initialize_offline_storage()
             if message == "Registration successful":
                 log_connection("User registration successful")
                 messagebox.showinfo("Success", "Registration successful! You can now login.")
@@ -945,68 +947,46 @@ class ChatApp:
                 self.show_info_message(f"{username} left the channel")
     
     def update_peers_list(self):
-        """Update the list of online peers in the UI."""
-        # Clear current list
+        """Update the list of online peers in the UI based on server data."""
         for widget in self.peers_frame.winfo_children():
             widget.destroy()
-        
-        # Get peers for current channel
+
         channel_id = self.client.current_channel
         if not channel_id:
             return
-        
-        peers = []
-        
-        # Get users from channel_users tracking
-        if channel_id in self.client.channel_users:
-            channel_users = self.client.channel_users[channel_id]
-            
-            # Log the users we're displaying for debugging
-            log_connection(f"Channel users in {channel_id}: {channel_users}")
-            
-            for username in channel_users:
-                # Skip our own username
-                if username == self.client.username:
-                    continue
-                    
-                # Check if user is a host
-                is_host = False
-                if channel_id in self.online_peers and username in self.online_peers[channel_id]:
-                    is_host = self.online_peers[channel_id][username].get('is_host', False)
-                    
-                peers.append({
-                    'username': username,
-                    'is_host': is_host
-                })
-        
-        # Add ourselves if we're in the channel and authenticated
-        if self.client.authenticated and self.client.username:
-            # Check if we're the host
-            is_host = channel_id in self.client.is_channel_host and self.client.is_channel_host[channel_id]
-            
-            peers.append({
-                'username': self.client.username,
-                'is_host': is_host
-            })
-        
-        # Display peers
-        if not peers:
-            no_peers_label = ttk.Label(self.peers_frame, text="No online peers", foreground="#999999")
-            no_peers_label.pack(fill=tk.X, padx=5, pady=2)
-        else:
-            for peer in peers:
-                username = peer['username']
-                is_host = peer['is_host']
-                
+
+        current_channel_users = self.client.channel_users.get(channel_id, [])
+
+        log_connection(f"Updating peers list for {channel_id}. Server reports users: {current_channel_users}")
+
+        displayed_count = 0
+        for username in current_channel_users:
+            # Determine if the user is the host (only reliably known for self)
+            is_host = False
+            if username == self.client.username and self.client.is_channel_host.get(channel_id, False):
+                 is_host = True
+
+            if username == self.client.username:
+                # Display self with appropriate indicator
+                label_text = f"👤 {username} (You)"
                 if is_host:
-                    label_text = f"👑 {username} (Host)"
-                    label_color = "#ffd700"  # Gold for host
+                    label_text = f"👑 {username} (You, Host)"
+                    label_color = "#ffd700" # Gold for host
                 else:
+                    label_color = "#7289da" # Special color for self
+            else:
                     label_text = f"👤 {username}"
-                    label_color = "#ffffff"
-                    
-                peer_label = ttk.Label(self.peers_frame, text=label_text, foreground=label_color)
-                peer_label.pack(fill=tk.X, padx=5, pady=2)
+                    label_color = "#ffffff" # Default white for others
+
+            peer_label = ttk.Label(self.peers_frame, text=label_text, foreground=label_color)
+            peer_label.pack(fill=tk.X, padx=5, pady=2)
+            displayed_count += 1
+
+        if displayed_count == 0:
+             no_peers_label = ttk.Label(self.peers_frame, text="No users in channel", foreground="#999999")
+             no_peers_label.pack(fill=tk.X, padx=5, pady=2)
+
+        log_connection(f"Displayed {displayed_count} users in peers list.")
     
     def view_livestream(self):
         """View a livestream for the current channel."""
