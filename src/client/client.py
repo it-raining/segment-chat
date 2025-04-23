@@ -516,7 +516,7 @@ class ChatClient:
             if self.channel_users_callback:
                 self.channel_users_callback(channel_id, self.channel_users.get(channel_id, []), event=event, username=username)
         elif msg_type == 'set_invisible_response':
-            if hasattr(self, 'invisible_status_callback') and self.invisible_status_callback:
+            if self.invisible_status_callback:
                 self.invisible_status_callback(message_data.get('success', False), message_data.get('invisible', False))
         elif msg_type == 'channel_host_info':
              # Handle host info update (for P2P)

@@ -1485,11 +1485,15 @@ def handle_client(client_socket):
                         if not username:
                             response = {"type": "set_invisible_response", "success": False, "message": "Not authenticated"}
                         else:
-                            if data.get("invisible", False):
-                                invisible_users.add(username)
+                            is_invisible = data.get("invisible", False)
+                            if isinstance(is_invisible, bool):  # Kiểm tra kiểu dữ liệu
+                                if is_invisible:
+                                    invisible_users.add(username)
+                                else:
+                                    invisible_users.discard(username)
+                                response = {"type": "set_invisible_response", "success": True, "invisible": is_invisible}
                             else:
-                                invisible_users.discard(username)
-                            response = {"type": "set_invisible_response", "success": True, "invisible": True/False}
+                                response = {"type": "set_invisible_response", "success": False, "message": "Invalid invisible value"}
                     send_framed_message(client_socket, response)
             
             except Exception as e:
