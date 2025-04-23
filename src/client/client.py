@@ -509,10 +509,13 @@ class ChatClient:
             channel_id = message_data['channel_id']
             event = message_data['event']
             username = message_data['username']
-            # Nếu server gửi kèm danh sách users mới, hãy cập nhật:
             users = message_data.get('users')
             if users is not None:
                 self.channel_users[channel_id] = users
+            elif event == 'leave' and channel_id in self.channel_users:
+                # Nếu không có danh sách users mới, tự xóa user khỏi danh sách local
+                if username in self.channel_users[channel_id]:
+                    self.channel_users[channel_id].remove(username)
             if self.channel_users_callback:
                 self.channel_users_callback(channel_id, self.channel_users.get(channel_id, []), event=event, username=username)
         elif msg_type == 'set_invisible_response':

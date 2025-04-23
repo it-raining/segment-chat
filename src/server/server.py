@@ -527,7 +527,7 @@ def remove_user_from_channels(client_id):
     
     # Notify about user leaving
     for channel_id in channels_to_notify:
-        broadcast_user_leave(channel_id, username)
+        broadcast_user_channel_event(channel_id, "leave", username)
 
 def handle_register_livestream(client_socket, client_id, data):
     """Handle request to register a livestream."""
@@ -1455,6 +1455,16 @@ def handle_client(client_socket):
                         if username and username in online_users and online_users[username] == client_id:
                             del online_users[username]
                         active_users[client_id] = {"authenticated": False, "username": None}
+                    channels_to_notify = []
+                    with channel_users_lock:
+                        for channel_id, users in list(channel_users.items()):
+                            if username in users:
+                                del users[username]
+                                channels_to_notify.append(channel_id)
+                                if not users:
+                                    del channel_users[channel_id]
+                    for channel_id in channels_to_notify:
+                        broadcast_user_channel_event(channel_id, "leave", username)
                     response_dict = {"type": "logout", "success": True}
                     try:
                         send_framed_message(client_socket, response_dict)
